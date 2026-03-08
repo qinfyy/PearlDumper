@@ -84,3 +84,13 @@ pub fn scan_unity_player() -> Option<usize> {
 
     find_qword_addr(&data, base_addr, &pe)
 }
+
+#[macro_export]
+macro_rules! as_cstr {
+    ($s:expr) => {
+        ::std::ffi::CString::new($s)
+            .unwrap()
+            .to_bytes_with_nul()
+            .as_ptr()
+    };
+}

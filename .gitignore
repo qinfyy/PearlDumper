@@ -1,2 +1,10 @@
 # Default ignored files
 /target
+
+# Output files
+/output
+
+.idea/
+.history/
+
+/test

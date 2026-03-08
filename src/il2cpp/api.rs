@@ -1,5 +1,7 @@
 use std::ffi::c_void;
 
+use crate::{as_cstr};
+
 use super::{native::Il2CppObject, util, GA_BASE};
 
 macro_rules! il2cpp_api {
@@ -16,7 +18,7 @@ macro_rules! il2cpp_api {
         }
     };
 }
-
+il2cpp_api!(21, il2cpp_get_corlib() -> Il2CppImage);
 il2cpp_api!(22, il2cpp_assembly_get_image(assembly: Il2CppAssembly) -> Il2CppImage);
 il2cpp_api!(31, il2cpp_class_get_fields(klass: Il2CppClass, iter: *const *const usize) -> Il2CppField);
 il2cpp_api!(33, il2cpp_class_get_interface(klass: Il2CppClass) -> usize);
@@ -29,6 +31,7 @@ il2cpp_api!(45, il2cpp_class_get_flags(klass: Il2CppClass) -> i32);
 il2cpp_api!(49, il2cpp_class_from_type(r#type: Il2CppType) -> Il2CppClass);
 il2cpp_api!(53, il2cpp_class_is_enum(klass: Il2CppClass) -> bool);
 il2cpp_api!(63, il2cpp_domain_get() -> Il2CppDomain);
+il2cpp_api!(64, il2cpp_domain_assembly_open(domain: Il2CppDomain, name: *const u8) -> Il2CppAssembly);
 il2cpp_api!(65, il2cpp_domain_get_assemblies(domain: Il2CppDomain, size: *mut usize) -> *mut Il2CppAssembly);
 il2cpp_api!(72, il2cpp_field_get_flags(field: Il2CppField) -> i32);
 il2cpp_api!(73, il2cpp_field_get_name(field: Il2CppField) -> *const i8);
@@ -40,6 +43,7 @@ il2cpp_api!(117, il2cpp_method_get_name(method: Il2CppMethod) -> *const i8);
 il2cpp_api!(123, il2cpp_method_get_param_count(method: Il2CppMethod) -> u32);
 il2cpp_api!(124, il2cpp_method_get_param(method: Il2CppMethod, index: u32) -> Il2CppType);
 il2cpp_api!(127, il2cpp_object_get_class(obj: Il2CppObject) -> Il2CppClass);
+il2cpp_api!(129, il2cpp_object_get_virtual_method(obj: Il2CppObject, method: Il2CppMethod) -> Il2CppMethod);
 il2cpp_api!(130, il2cpp_object_new(klass: Il2CppClass) -> Il2CppObject);
 il2cpp_api!(131, il2cpp_object_unbox(obj: Il2CppObject) -> Il2CppObject);
 il2cpp_api!(154, il2cpp_thread_attach(domain: Il2CppDomain) -> usize);
@@ -60,6 +64,16 @@ impl Il2CppDomain {
         let mut count = 0;
         let assemblies = il2cpp_domain_get_assemblies(*self, &mut count);
         unsafe { std::slice::from_raw_parts(assemblies, count).to_vec() }
+    }
+
+    #[inline]
+    pub fn assembly_open(&self, name: &str) -> Option<Il2CppAssembly> {
+        let assembly = il2cpp_domain_assembly_open(*self, as_cstr!(name));
+        if assembly.0 == 0 {
+            None
+        } else {
+            Some(Il2CppAssembly(assembly.0))
+        }
     }
 }
 
@@ -182,7 +196,7 @@ impl Il2CppClass {
 
     #[inline]
     pub fn find_method(&self, name: &str, arg_types: &[&str]) -> Option<Il2CppMethod> {
-        // println!("name class call: {}", self.name());
+
         for method in self.methods() {
             if method.name() == name {
 
@@ -194,6 +208,7 @@ impl Il2CppClass {
                             fail = true;
                             break;
                         }
+
                     }
 
                     if !fail {
@@ -294,6 +309,10 @@ pub struct MethodInfo {
 pub struct Il2CppMethod(pub usize);
 
 impl Il2CppMethod {
+    #[inline]
+    pub fn new(ptr: usize) -> Self {
+        Il2CppMethod(ptr)
+    }
     pub unsafe fn as_ptr(&self) -> *const MethodInfo {
         self.0 as *const MethodInfo
     }
@@ -396,7 +415,6 @@ impl Il2CppField {
     pub fn get_type(&self) -> Il2CppType {
        il2cpp_field_get_type(*self)
     }
-
     #[inline]
     pub fn get_value_object(&self, instance: Il2CppObject) -> Option<Il2CppObject> {
         let value = il2cpp_field_get_value_object(*self, instance);
@@ -406,4 +424,5 @@ impl Il2CppField {
             Some(value)
         }
     }
+
 }

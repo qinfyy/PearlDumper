@@ -4,23 +4,18 @@ use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
-    result::Result,
+    result::Result, thread, time::Duration,
 };
 
 use crate::{
     core::{
-        assembly::MonoAssembly,
-        json_convert::JsonConvert,
-        runtime::{MonoField, RuntimeType},
-        string::SystemString,
+        assembly::MonoAssembly, excel_table::ExcelTable, json_convert::JsonConvert, runtime::{MonoField, RuntimeType}, string::SystemString
     },
     il2cpp::{
-        get_cached_class,
-        native::{Il2CppArray, NativeArray, NativeDictionary},
+        native::{Il2CppArray, NativeArray, NativeDictionary}
     },
     output::util::{
-        GREEN_PROGRESS_BAR, YELLOW_PROGRESS_BAR, create_progress_bar, get_runtime_type_name,
-        report_errors,
+        GREEN_PROGRESS_BAR, YELLOW_PROGRESS_BAR, create_progress_bar, report_errors
     },
 };
 
@@ -51,46 +46,33 @@ pub fn get_performance_ds() -> Vec<serde_json::Value> {
     PERFORMANCE_DS.lock().unwrap().clone()
 }
 
-fn check_fields_class(fields: &Il2CppArray) -> Result<(bool, Vec<String>), Box<dyn Error>> {
+#[derive(Debug, Clone)]
+pub struct ExcelData {
+    pub spath: Vec<String>,
+}
+
+pub fn check_fields_class(fields: &Il2CppArray) -> Result<(bool, ExcelData), Box<dyn Error>> {
     if fields.len() >= 4 {
-        let mut has_spath_field = false;
-        let mut has_data_dict_field = false;
-        // let mut has_hash_index_field = false;
-        let mut has_is_data_loaded_field = false;
+
         let mut str_field: MonoField = MonoField::new(0);
-        let mut dict_field: MonoField = MonoField::new(0);
         for i in 0..fields.len() {
-            let field_ptr: &usize = fields.get(i);
-            let field = MonoField::new(*field_ptr);
-            if get_runtime_type_name(&field.get_field_type()?, false)? == "String[]" {
-                has_spath_field = true;
-                if field.get_name()?.as_str() != "fullPathList" {
-                    str_field = field;
-                }
-            } else if get_runtime_type_name(&field.get_field_type()?, false)?
-                .starts_with("Dictionary<")
-            {
-                has_data_dict_field = true;
-                dict_field = field;
-            // } else if get_runtime_type_name(&field.get_field_type()?, false)? == "Byte" {
-            //     has_hash_index_field = true;
-            } else if get_runtime_type_name(&field.get_field_type()?, false)? == "Boolean" {
-                has_is_data_loaded_field = true;
+            let field = fields.get::<MonoField>(i);
+            let field_name = field.get_name()?.as_str();
+            if field_name == "s_PathList" || field_name == "PIPMCNKGEKM" {
+                str_field = field.clone();
             }
         }
 
-        if has_spath_field
-            && has_data_dict_field
-            // && has_hash_index_field
-            && has_is_data_loaded_field
-            && str_field.0 != 0
-        {
+        if str_field.0 != 0 {
             unsafe {
-                let _spath = str_field.get_value(0);
+                let ptr: *const std::ffi::c_void = std::ptr::null();
+                let _spath = str_field.get_value(ptr as usize);
                 let spath = match _spath {
                     Ok(path) => path,
                     Err(_) => {
-                        return Ok((false, vec![]));
+                        return Ok((false, ExcelData {
+                            spath: vec![],
+                        }));
                     }
                 };
 
@@ -100,17 +82,33 @@ fn check_fields_class(fields: &Il2CppArray) -> Result<(bool, Vec<String>), Box<d
                     let item = arr_native.vector[j];
                     list_spath.push(item.as_str().to_string());
                 }
-                return Ok((true, list_spath));
+                return Ok((true, ExcelData {
+                    spath: list_spath,
+                }));
             }
         }
     }
-    Ok((false, vec![]))
+    Ok((false, ExcelData {
+        spath: vec![],
+    }))
 }
 
+
 pub fn excel_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
+        println!("\r");
+
+        for i in (1..=60).rev() {
+            print!("\r⏳ Waiting {:2} seconds before dump excel...   ", i); 
+            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+            thread::sleep(Duration::from_secs(1));
+        }
+
+        println!("\r✅ Done!                    ");
+
+
     println!("{}", "📦 Scanning and filtering classes...".green().bold());
     let types = mono_assembly.get_types(60 != 0)?;
-    let mut list_excel: HashMap<String, Vec<String>> = HashMap::new();
+    let mut list_excel: HashMap<String, ExcelData> = HashMap::new();
 
     let pb_filter = create_progress_bar(types.len() as u64, YELLOW_PROGRESS_BAR);
 
@@ -123,12 +121,14 @@ pub fn excel_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
         ));
 
         let fields = runtime_type.get_fields(60)?;
+
+
         let is_valid = check_fields_class(&fields)?;
         if is_valid.0 {
             list_excel.insert(
                 runtime_type.get_full_name()?.as_str().to_string(),
                 is_valid.1,
-            );
+            ); 
         }
         pb_filter.inc(1);
     }
@@ -149,45 +149,14 @@ pub fn excel_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
         pb.set_message(format!("Processing {}", key.clone()));
 
         unsafe {
-            let class_cf = get_cached_class(&key).ok_or(anyhow::anyhow!("no such class"))?;
+            let excel_table = ExcelTable::new(key.as_str());
+            excel_table.cctor()?;
+            if !excel_table.is_data_loaded()? || excel_table.is_data_empty()? {
+                excel_table.load_data()?;
+            }
 
-            let _mt_load_data = class_cf
-                .find_method("LoadData", &[])
-                .ok_or(anyhow::anyhow!("no such method"));
 
-            let _ = match _mt_load_data {
-                Ok(mt_load_data) => {
-                    let func_ld: extern "fastcall" fn() -> usize =
-                        std::mem::transmute(mt_load_data.va());
-
-                    let _ = microseh::try_seh(|| func_ld()).map_err(|e| {
-                        anyhow::anyhow!(
-                            "Runtime Exception! (type: {} method: {}): {:?}",
-                            class_cf.byval_arg().name(),
-                            mt_load_data.name(),
-                            e
-                        )
-                    });
-                }
-                Err(_) => {}
-            };
-
-            let mt_get_dict = class_cf
-                .find_method_by_return_type("System.Collections.Generic.Dictionary<", &[])
-                .ok_or(anyhow::anyhow!("no such method"))?;
-
-            let func_gd: extern "fastcall" fn() -> usize = std::mem::transmute(mt_get_dict.va());
-
-            let _dict_ptr = microseh::try_seh(|| func_gd()).map_err(|e| {
-                anyhow::anyhow!(
-                    "Runtime Exception! (type: {} method: {}): {:?}",
-                    class_cf.byval_arg().name(),
-                    mt_get_dict.name(),
-                    e
-                )
-            });
-
-            let dict_ptr = match _dict_ptr {
+            let dict_ptr = match excel_table.get_excel_table() {
                 Ok(dict_ptr) => dict_ptr,
                 Err(_) => {
                     error_count += 1;
@@ -198,21 +167,22 @@ pub fn excel_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
             let res_dict = &*(dict_ptr as *const NativeDictionary<usize, usize>);
             let mut list_json: Vec<serde_json::Value> = vec![];
 
+
             if let Some(entries) = res_dict.entries.as_ref() {
                 for i in 0..res_dict.count as usize {
                     let entry = entries.vector[i];
                     if entry.hash_code >= 0 {
                         let json = JsonConvert::serialize_object(entry.value)?;
                         let value: serde_json::Value = serde_json::from_str(&json.as_str())?;
-                        if values.contains(&String::from("MazePlane")) {
-                            PLANES.lock().unwrap().push(value.clone());
-                        } else if values.contains(&String::from("AdventurePlayer")) {
-                            ADVENTURE_PLAYER.lock().unwrap().push(value.clone());
-                        } else if values.contains(&String::from("SummonUnitData")) {
-                            SUMMON_UNIT_DATA.lock().unwrap().push(value.clone());
-                        } else if values.contains(&String::from("PerformanceDS")) {
-                            PERFORMANCE_DS.lock().unwrap().push(value.clone());
-                        }
+                        // if values.spath.contains(&String::from("MazePlane")) {
+                        //     PLANES.lock().unwrap().push(value.clone());
+                        // } else if values.spath.contains(&String::from("AdventurePlayer")) {
+                        //     ADVENTURE_PLAYER.lock().unwrap().push(value.clone());
+                        // } else if values.spath.contains(&String::from("SummonUnitData")) {
+                        //     SUMMON_UNIT_DATA.lock().unwrap().push(value.clone());
+                        // } else if values.spath.contains(&String::from("PerformanceDS")) {
+                        //     PERFORMANCE_DS.lock().unwrap().push(value.clone());
+                        // }
                         list_json.push(value);
                     }
                 }
@@ -220,7 +190,7 @@ pub fn excel_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
             let json_str = serde_json::to_string_pretty(&list_json)?;
             let output_dir = Path::new("ExcelOutput");
 
-            for name in values {
+            for name in values.spath.clone() {
                 let rel_path = Path::new(&name);
                 let full_path: PathBuf = output_dir.join(rel_path).with_extension("json");
                 if let Some(parent) = full_path.parent() {

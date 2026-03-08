@@ -146,7 +146,7 @@ pub fn search_and_replace_dyn_float(obj: SystemObject) -> Result<(), Box<dyn Err
         if fields.get(i) == 0 {
             continue;
         }
-        let field: &MonoField = fields.get(i);
+        let field = fields.get::<MonoField>(i);
 
         let value = field.get_value(obj.0)?;
         if value.0 == 0 {

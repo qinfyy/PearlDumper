@@ -24,6 +24,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "793db76d6187cd04dff33004d8e6c9cc4e05cd330500379d2394209271b4aeee"
 
 [[package]]
+name = "castorice-dumper"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "colored",
+ "ctor",
+ "figlet-rs",
+ "indicatif",
+ "lazy_static",
+ "microseh",
+ "once_cell",
+ "paste",
+ "pelite",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "windows",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -105,27 +126,6 @@ name = "dtor-proc-macro"
 version = "0.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7454e41ff9012c00d53cf7f475c5e3afa3b91b7c90568495495e8d9bf47a1055"
-
-[[package]]
-name = "dumper"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "colored",
- "ctor",
- "figlet-rs",
- "indicatif",
- "lazy_static",
- "microseh",
- "once_cell",
- "paste",
- "pelite",
- "regex",
- "serde",
- "serde_json",
- "thiserror",
- "windows",
-]
 
 [[package]]
 name = "encode_unicode"

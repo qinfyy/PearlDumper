@@ -9,15 +9,15 @@ use std::{
 use windows::{core::{w, PCWSTR}, Win32::System::{Console::{AllocConsole, SetConsoleTitleW}, LibraryLoader::GetModuleHandleW}};
 
 
-fn init() -> Result<(), Box<dyn Error>> {
+pub fn init() -> Result<(), Box<dyn Error>> {
     unsafe {
         AllocConsole()?;
-        let title = "Firefly Dumper";
+        let title = "Castorice Dumper";
         let wide: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
         let _ = SetConsoleTitleW(PCWSTR(wide.as_ptr()));
 
         let standard_font = FIGfont::standard().unwrap();
-        let figure = standard_font.convert("Firefly Dumper").unwrap();
+        let figure = standard_font.convert("Castorice Dumper").unwrap();
 
         println!("{}", figure.to_string().blue().bold());
 
@@ -43,10 +43,17 @@ fn init() -> Result<(), Box<dyn Error>> {
         pb.inc(1);
     
         pb.finish_with_message("✔ All modules loaded");
+        println!("\r");
 
-        println!("{}", "Setting...".green().bold());
-        thread::sleep(Duration::from_secs(25));
-        let _ = il2cpp::init(*UNITYPLAYER_HANDLE, *GAMEASSEMBLY_HANDLE);
+        for i in (1..=16).rev() {
+            print!("\r⏳ Waiting {:2} seconds...   ", i); 
+            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+            thread::sleep(Duration::from_secs(1));
+        }
+
+        println!("\r✅ Done!                    ");
+
+        il2cpp::init(*UNITYPLAYER_HANDLE, *GAMEASSEMBLY_HANDLE)?;
 
         println!("{}", "Dumping...".green().bold());
         match output::init() {
@@ -60,6 +67,6 @@ fn init() -> Result<(), Box<dyn Error>> {
 #[ctor]
 fn entry() {
     thread::spawn(|| {
-        init().unwrap_or_else(|e| panic!("firefly-dumper encountered an error: {}", e));
+        init().unwrap_or_else(|e| panic!("castorice-dumper encountered an error: {}", e));
     });
 }

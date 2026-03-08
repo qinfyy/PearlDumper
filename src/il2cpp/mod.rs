@@ -1,20 +1,22 @@
 use std::{collections::HashMap, path::Path, sync::OnceLock};
 use util::scan_unity_player;
 
-use crate::il2cpp::{api::{Il2CppClass, Il2CppMethod}, error::Il2CppError};
+use crate::il2cpp::{
+    api::{Il2CppClass, Il2CppMethod},
+    error::Il2CppError,
+};
 
-pub mod util;
 pub mod api;
-pub mod native;
 pub mod error;
-
+pub mod native;
+pub mod util;
+pub mod constants;
 
 static mut UP_BASE: usize = 0;
 static mut GA_BASE: usize = 0;
 static mut API_BASE_PTR: usize = 0;
 static FUNCTIONS_TABLE: OnceLock<HashMap<String, Il2CppMethod>> = OnceLock::new();
 static TYPE_TABLE: OnceLock<HashMap<String, Il2CppClass>> = OnceLock::new();
-
 
 #[inline]
 pub fn get_native_method(key: &String) -> Option<Il2CppMethod> {
@@ -41,7 +43,10 @@ pub fn init(up_handle: usize, ga_handle: usize) -> Result<(), Il2CppError> {
         GA_BASE = ga_handle;
 
         match scan_unity_player() {
-            Some(addr) => API_BASE_PTR = addr,
+            Some(addr) => {
+                API_BASE_PTR = addr;
+                println!("UnityPlayer.dll base address: {}", addr);
+            }
             None => {
                 std::thread::sleep(std::time::Duration::from_millis(u64::MAX));
                 Il2CppError::FileNotFound("UnityPlayer.dll");

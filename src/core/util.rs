@@ -1,4 +1,5 @@
 
+
 #[macro_export]
 macro_rules! cs_class {
     ($class_name:expr) => {
@@ -313,13 +314,13 @@ macro_rules! cs_field {
         paste::paste! {
             #[inline(always)]
             pub fn $ident() -> anyhow::Result<$ret_ty> {
-                let class = RuntimeType::from_class(Self::get_class()?);
+                let class = $crate::core::runtime::RuntimeType::from_class(Self::get_class()?);
                 let Ok(field_info) = class.get_field($name) else {
                     return Err(anyhow::anyhow!("no such static field {} in type {}", $name, class.get_il2cpp_type().name()));
                 };
 
                 let value = microseh::try_seh(|| {
-                    let Some(value) = field_info.get_value($crate::il2cpp::native::Il2CppObject::NULL) else {
+                    let Some(value) = field_info.get_value_object($crate::il2cpp::native::Il2CppObject::NULL) else {
                         return Err(anyhow::anyhow!("field {} in {} is null", class.get_il2cpp_type().name(), $name))
                     };
                     Ok(value)
@@ -351,13 +352,13 @@ macro_rules! cs_field {
                     ));
                 }
 
-                let class = RuntimeType::from_class(self.as_object().get_class());
+                let class = $crate::core::runtime::RuntimeType::from_class(self.as_object().get_class());
                 let Ok(field_info) = class.get_field($name) else {
                     return Err(anyhow::anyhow!("no such field {} in type {}", $name, class.get_il2cpp_type().name()));
                 };
 
                 let value = microseh::try_seh(|| {
-                    let Some(value) = field_info.get_value($crate::il2cpp::native::Il2CppObject(self.0)) else {
+                    let Some(value) = field_info.get_value_object($crate::il2cpp::native::Il2CppObject(self.0)) else {
                         return Err(anyhow::anyhow!("field {} in {} is null", class.get_il2cpp_type().name(), $name))
                     };
                     Ok(value)

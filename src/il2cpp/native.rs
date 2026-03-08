@@ -41,6 +41,10 @@ pub struct Il2CppArray(pub usize);
 
 impl Il2CppArray {
     #[inline(always)]
+    pub fn new(ptr: usize) -> Self {
+        Il2CppArray(ptr)
+    }
+    #[inline(always)]
     pub fn class(&self) -> Il2CppClass {
         unsafe { Il2CppClass(*(self.0 as *const usize)) }
     }
@@ -97,12 +101,15 @@ impl Il2CppArray {
     }
 }
 
-
 #[derive(Debug, Copy, Clone)]
 #[repr(transparent)]
 pub struct NativeList(pub usize);
 
 impl NativeList {
+    #[inline(always)]
+    pub fn new(ptr: usize) -> Self {
+        NativeList(ptr)
+    }
     #[inline(always)]
     pub fn class(&self) -> Il2CppClass {
         unsafe { Il2CppClass(*(self.0 as *const usize)) }
@@ -121,6 +128,14 @@ impl NativeList {
     #[inline(always)]
     pub fn size(&self) -> i32 {
         unsafe { *((self.0 + 24) as *const i32) }
+    }
+
+    #[inline(always)]
+    pub fn to_vec<T: Clone>(self) -> Vec<T> {
+        unsafe {
+            let items = self.items();
+            std::slice::from_raw_parts(items.first_item_ptr() as *const T, self.size() as usize).to_vec()
+        }
     }
 
     #[inline(always)]
