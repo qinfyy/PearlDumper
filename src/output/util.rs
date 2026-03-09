@@ -258,7 +258,7 @@ pub fn report_errors(error_count: i32, message: &str) {
     if error_count > 0 {
         println!(
             "{} : {}",
-            format!("❌ Some errors occurred during {} | Error count: {}", message, error_count).red().bold(),
+            format!("[-] Some errors occurred during {} | Error count: {}", message, error_count).red().bold(),
             error_count
         );
     }

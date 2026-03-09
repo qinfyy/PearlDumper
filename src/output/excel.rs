@@ -98,15 +98,15 @@ pub fn excel_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
         println!("\r");
 
         for i in (1..=60).rev() {
-            print!("\r⏳ Waiting {:2} seconds before dump excel...   ", i); 
-            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+            print!("\r[*] Waiting {:2} seconds before dump excel...   ", i);
+            Write::flush(&mut std::io::stdout()).unwrap();
             thread::sleep(Duration::from_secs(1));
         }
 
-        println!("\r✅ Done!                    ");
+        println!("\r[+] Done!                    ");
 
 
-    println!("{}", "📦 Scanning and filtering classes...".green().bold());
+    println!("{}", "[*] Scanning and filtering classes...".green().bold());
     let types = mono_assembly.get_types(60 != 0)?;
     let mut list_excel: HashMap<String, ExcelData> = HashMap::new();
 
@@ -133,15 +133,15 @@ pub fn excel_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
         pb_filter.inc(1);
     }
 
-    pb_filter.finish_with_message("✅ Finished filtering types.");
+    pb_filter.finish_with_message("[+] Finished filtering types.");
     println!(
         "{}",
-        "✅ Finished scanning and filtering classes..."
+        "[+] Finished scanning and filtering classes..."
             .green()
             .bold()
     );
 
-    println!("{}", "📦 Processing excel data...".green().bold());
+    println!("{}", "[*] Processing excel data...".green().bold());
     let len = list_excel.len();
     let pb = create_progress_bar(len as u64, GREEN_PROGRESS_BAR);
     let mut error_count = 0;
@@ -181,20 +181,18 @@ pub fn excel_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
                     let entry = entries.vector[i];
                     if entry.hash_code >= 0 {
                         //let json = JsonConvert::serialize_object(entry.value).expect("json serialize error");
-                        if !key.contains("ConstValueClientExcelTable") {
-                            match JsonConvert::serialize_object(entry.value) {
-                                Ok(json) => {
-                                    // 成功序列化时继续处理
-                                    let value: serde_json::Value = serde_json::from_str(&json.as_str())?;
-                                    list_json.push(value);
-                                }
-                                Err(_) => {
-                                    // 序列化失败时，可以选择继续
-                                    eprintln!("Failed to serialize {} entry value at index {}", key, i);
-                                    error_count += 1;
-                                    // 或者可以选择跳过这个条目，继续执行
-                                    continue;
-                                }
+                        if key.contains("ConstValueClientExcelTable") {
+                            continue //会崩?
+                        }
+                        match JsonConvert::serialize_object(entry.value) {
+                            Ok(json) => {
+                                let value: serde_json::Value = serde_json::from_str(&json.as_str())?;
+                                list_json.push(value);
+                            }
+                            Err(_) => {
+                                //eprintln!("Failed to serialize {} entry value at index {}", key, i);
+                                error_count += 1;
+                                continue;
                             }
                         }
                         //let value: serde_json::Value = serde_json::from_str(&json.as_str())?;
@@ -228,8 +226,8 @@ pub fn excel_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
 
         pb.inc(1);
     }
-    pb.finish_with_message("✅ Finished dumping all Excel data.");
+    pb.finish_with_message("[+] Finished dumping all Excel data.");
     report_errors(error_count, "dumping Excel data");
-    println!("{}", "✅ Finished dumping Excel data.".green().bold());
+    println!("{}", "[+] Finished dumping Excel data.".green().bold());
     Ok(())
 }

@@ -279,7 +279,7 @@ struct CmdCache(HashMap<String, u16>);
 
 
 pub fn proto_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
-    println!("{}", "📦 Dumping raw proto....".green().bold());
+    println!("{}", "[*] Dumping raw proto....".green().bold());
     let file = File::create("StarRail_Raw.proto")?;
     let mut writer = BufWriter::new(file);
 
@@ -306,15 +306,15 @@ pub fn proto_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
         pb.inc(1);
     }
 
-    pb.finish_with_message("✅ Finished dumping raw proto.");
+    pb.finish_with_message("[+] Finished dumping raw proto.");
     writer.write_all(final_str.as_bytes())?;
     writer.flush()?;
 
-    println!("{}", "✅ Finished dumping raw proto.".green().bold());
+    println!("{}", "[+] Finished dumping raw proto.".green().bold());
 
     println!(
         "{}",
-        "📦 Translating names of some proto classes..."
+        "[*] Translating names of some proto classes..."
             .green()
             .bold()
     );
@@ -322,7 +322,8 @@ pub fn proto_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
     let mut error_map: HashMap<String, u16> = HashMap::new();
 
     let class_cf =
-        get_cached_class(&String::from("EIFPLDNKAIB")).ok_or(anyhow::anyhow!("no such class"))?; //4.0.5x
+        //get_cached_class(&String::from("EIFPLDNKAIB")).ok_or(anyhow::anyhow!("no such class"))?; //4.0.5x
+        get_cached_class(&String::from("DHLPABNKLPL")).ok_or(anyhow::anyhow!("no such class"))?; //4.0.0
 
     let pb2 = create_progress_bar(map.len() as u64, BLUE_PROGRESS_BAR);
 
@@ -374,14 +375,14 @@ pub fn proto_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
             }
         }
     }
-    pb2.finish_with_message("✅ Finished translating names of some proto classes.");
+    pb2.finish_with_message("[+] Finished translating names of some proto classes.");
 
     if !error_map.is_empty() {
         let json = serde_json::to_string_pretty(&CmdCache(error_map.clone()))?;
         std::fs::write("error_cmd.json", json)?;
         println!(
             "{} | Error count: {}",
-            "❌ Some proto classes could not be translated."
+            "[-] Some proto classes could not be translated."
                 .red()
                 .bold(),
             error_map.len()
@@ -391,7 +392,7 @@ pub fn proto_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
     File::create(PROTO_FILE)?.write_all(final_str.as_bytes())?;
     println!(
         "{}",
-        "✅ Finished translating names of some proto classes."
+        "[+] Finished translating names of some proto classes."
             .green()
             .bold()
     );

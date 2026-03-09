@@ -16,29 +16,29 @@ use crate::{
 
 
 pub fn config_dump() -> Result<(), Box<dyn Error>> {
-    println!("{}", "📦 Processing Summon Unit...".green().bold());
+    println!("{}", "[*] Processing Summon Unit...".green().bold());
     summon_unit_dump()?;
-    println!("{}", "✅ Finished processing summon unit...".green().bold());
+    println!("{}", "[+] Finished processing summon unit...".green().bold());
 
-    println!("{}", "📦 Processing Adventure Player...".green().bold());
+    println!("{}", "[*] Processing Adventure Player...".green().bold());
     adventure_player_dump()?;
-    println!("{}", "✅ Finished processing adventure player...".green().bold());
+    println!("{}", "[+] Finished processing adventure player...".green().bold());
 
-    println!("{}", "📦 Processing Map...".green().bold());
+    println!("{}", "[*] Processing Map...".green().bold());
     map_dump()?;
-    println!("{}", "✅ Finished processing map...".green().bold());
+    println!("{}", "[+] Finished processing map...".green().bold());
 
-    println!("{}", "📦 Processing Floor...".green().bold());
+    println!("{}", "[*] Processing Floor...".green().bold());
     let group_map = floor_dump()?;
-    println!("{}", "✅ Finished processing floor...".green().bold());
+    println!("{}", "[+] Finished processing floor...".green().bold());
 
-    println!("{}", "📦 Processing Group...".green().bold());
+    println!("{}", "[*] Processing Group...".green().bold());
     group_dump(group_map)?;
-    println!("{}", "✅ Finished processing group...".green().bold());
+    println!("{}", "[+] Finished processing group...".green().bold());
 
-    // println!("{}", "📦 Processing Performance DS...".green().bold());
+    // println!("{}", "[*] Processing Performance DS...".green().bold());
     // performance_ds_dump()?;
-    // println!("{}", "✅ Finished processing performance ds...".green().bold());
+    // println!("{}", "[+] Finished processing performance ds...".green().bold());
     Ok(())
 }
 
@@ -94,7 +94,7 @@ pub fn floor_dump() -> Result<Vec<String>, Box<dyn Error>> {
             }
         }
     }
-    pb_filter.finish_with_message("✅ Finished dumping runtime floor.");
+    pb_filter.finish_with_message("[+] Finished dumping runtime floor.");
     report_errors(error_count, "dumping runtime floor");
     Ok(group_map)
 }
@@ -141,7 +141,7 @@ pub fn map_dump() -> Result<(), Box<dyn Error>> {
             process_file(&json_serializer, &out_file, &out_folder, group_ptr, &mut error_count)?;
         }
     }
-    pb_filter.finish_with_message("✅ Finished dumping navmap.");
+    pb_filter.finish_with_message("[+] Finished dumping navmap.");
     report_errors(error_count, "dumping navmap");
     Ok(())
 }
@@ -174,7 +174,7 @@ pub fn summon_unit_dump() -> Result<(), Box<dyn Error>> {
         process_file(&json_serializer, &out_file, &out_folder, group_ptr, &mut error_count)?;
         pb_filter.inc(1);
     }
-    pb_filter.finish_with_message("✅ Finished dumping summon unit.");
+    pb_filter.finish_with_message("[+] Finished dumping summon unit.");
     report_errors(error_count, "dumping summon unit");
     Ok(())
 }
@@ -208,7 +208,7 @@ pub fn adventure_player_dump() -> Result<(), Box<dyn Error>> {
         process_file(&json_serializer, &out_file, &out_folder, group_ptr, &mut error_count)?;
         pb_filter.inc(1);
     }
-    pb_filter.finish_with_message("✅ Finished dumping adventure player.");
+    pb_filter.finish_with_message("[+] Finished dumping adventure player.");
     report_errors(error_count, "dumping adventure player");
     Ok(())
 }
@@ -244,7 +244,7 @@ pub fn performance_ds_dump() -> Result<(), Box<dyn Error>> {
         process_file(&json_serializer, &out_file, &out_folder, group_ptr, &mut error_count)?;
         pb_filter.inc(1);
     }
-    pb_filter.finish_with_message("✅ Finished dumping performance ds.");
+    pb_filter.finish_with_message("[+] Finished dumping performance ds.");
 
     report_errors(error_count, "dumping performance ds");
     Ok(())
@@ -268,7 +268,7 @@ pub fn group_dump(group_map: Vec<String>) -> Result<(), Box<dyn Error>> {
         process_file(&json_serializer, &out_file, &out_folder, group_ptr, &mut error_count)?;
         pb_filter.inc(1);
     }
-    pb_filter.finish_with_message("✅ Finished dumping runtime group.");
+    pb_filter.finish_with_message("[+] Finished dumping runtime group.");
     report_errors(error_count, "dumping runtime group");
     Ok(())
 }

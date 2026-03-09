@@ -37,41 +37,41 @@ pub fn init() -> Result<(), Box<dyn Error>> {
 
     }
 
-    println!("{}", "✅ Start dumping cmdid".green().bold());
+    println!("{}", "[+] Start dumping cmdid".green().bold());
     if let Some(cmdid_assembly) = cmdid_assembly {
         match cmdid_dump(&cmdid_assembly) {
-            Ok(_) => println!("{}", "✅ CMDID dumping success".green().bold()),
+            Ok(_) => println!("{}", "[+] CMDID dumping success".green().bold()),
             Err(e) => println!("{} {}", "CMDID dumping error:".red().bold(), e),
         }
     }
 
-    println!("{}", "✅ Start dumping proto".green().bold());
+    println!("{}", "[+] Start dumping proto".green().bold());
     if let Some(proto_assembly) = proto_assembly {
         match proto_dump(&proto_assembly) {
-            Ok(_) => println!("{}", "✅ Proto dumping success".green().bold()),
+            Ok(_) => println!("{}", "[+] Proto dumping success".green().bold()),
             Err(e) => println!("{} {}", "Proto dumping error:".red().bold(), e),
         }
     }
 
-    println!("{}", "✅ Start dumping excel schema".green().bold());
+    println!("{}", "[+] Start dumping excel schema".green().bold());
     if let Some(excel_assembly) = excel_assembly {
         match excel_schema_dump(&excel_assembly) {
-            Ok(_) => println!("{}", "✅ Excel dumping success".green().bold()),
+            Ok(_) => println!("{}", "[+] Excel dumping success".green().bold()),
             Err(e) => println!("{} {}", "Excel dumping error:".red().bold(), e),
         }
     }
 
-    println!("{}", "✅ Start dumping excel".green().bold());
+    println!("{}", "[+] Start dumping excel".green().bold());
     if let Some(excel_assembly) = excel_assembly {
         match excel_dump(&excel_assembly) {
-            Ok(_) => println!("{}", "✅ Excel dumping success".green().bold()),
+            Ok(_) => println!("{}", "[+] Excel dumping success".green().bold()),
             Err(e) => println!("{} {}", "Excel dumping error:".red().bold(), e),
         }
     }
 
-    // println!("{}", "✅ Start dumping config".green().bold());
+    // println!("{}", "[+] Start dumping config".green().bold());
     // match config_dump() {
-    //     Ok(_) => println!("{}", "✅ Config dumping success".green().bold()),
+    //     Ok(_) => println!("{}", "[+] Config dumping success".green().bold()),
     //     Err(e) => println!("{} {}", "Config dumping error:".red().bold(), e),
     // };
 

@@ -29,7 +29,7 @@ pub fn get_cmdid() -> HashMap<String, usize> {
 
 
 fn handler_add_packet(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
-    println!("{}", "📦 Add packet handlers...".green().bold());
+    println!("{}", "[*] Add packet handlers...".green().bold());
    
     let types = mono_assembly.get_types(60 != 0)?;
     for i in 0..types.len() {
@@ -56,7 +56,7 @@ fn handler_add_packet(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>
                                 let parent_add_ok = module.add_packet_handlers_parent();
                                 if parent_add_ok.is_err() {
                                     println!(
-                                        "❌ Failed to add packet handlers {}",
+                                        "[-] Failed to add packet handlers {}",
                                         Il2CppObject::new(module.0).get_class().name().as_str()
                                     );
                                 }
@@ -64,14 +64,14 @@ fn handler_add_packet(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>
                         }
                         pb_filter.inc(1);
                     }
-                    pb_filter.finish_with_message("✅ Finished add packet handlers");
+                    pb_filter.finish_with_message("[+] Finished add packet handlers");
                 }
             }
         }
     }
     println!(
         "{}",
-        "✅ Finished add packet handlers..."
+        "[+] Finished add packet handlers..."
             .green()
             .bold()
     );
@@ -97,7 +97,7 @@ fn normalize_name(name: &str) -> String {
 }
 
 fn handler_dump_resp_and_notify(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
-    println!("{}", "📦 Dump response and notify...".green().bold());
+    println!("{}", "[*] Dump response and notify...".green().bold());
     let types = mono_assembly.get_types(60 != 0)?;
     for i in 0..types.len() {
         let runtime_ptr: &usize = types.get(i);
@@ -159,7 +159,7 @@ fn handler_dump_resp_and_notify(mono_assembly: &MonoAssembly) -> Result<(), Box<
                                     CMDID.lock().unwrap().insert(final_name.clone(), entry.key);
                                     pb_filter.inc(1);
                                 }
-                                pb_filter.finish_with_message("✅ Finished dump response and notify");
+                                pb_filter.finish_with_message("[+] Finished dump response and notify");
                             }
                         }
                         let json = serde_json::to_string_pretty(&CMDID.lock().unwrap().clone()).unwrap();
@@ -172,7 +172,7 @@ fn handler_dump_resp_and_notify(mono_assembly: &MonoAssembly) -> Result<(), Box<
             }
         }
     }
-    println!("{}", "✅ Finished dump response and notify...".green().bold());
+    println!("{}", "[+] Finished dump response and notify...".green().bold());
 
     Ok(())
 }

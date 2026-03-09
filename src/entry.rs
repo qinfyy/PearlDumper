@@ -6,12 +6,20 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::{
     error::Error, thread, time::Duration,
 };
-use windows::{core::{w, PCWSTR}, Win32::System::{Console::{AllocConsole, SetConsoleTitleW}, LibraryLoader::GetModuleHandleW}};
-
+use windows::{
+    core::{w, PCWSTR},
+    Win32::System::{
+        Console::{AllocConsole, SetConsoleTitleW,GetStdHandle, SetConsoleMode, ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, ENABLE_WRAP_AT_EOL_OUTPUT, STD_OUTPUT_HANDLE},
+        LibraryLoader::GetModuleHandleW
+    }
+};
 
 pub fn init() -> Result<(), Box<dyn Error>> {
     unsafe {
         AllocConsole()?;
+        let out = GetStdHandle(STD_OUTPUT_HANDLE)?;
+        SetConsoleMode(out, ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT)?;
+
         let title = "Castorice Dumper";
         let wide: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
         let _ = SetConsoleTitleW(PCWSTR(wide.as_ptr()));
@@ -42,16 +50,16 @@ pub fn init() -> Result<(), Box<dyn Error>> {
         }
         pb.inc(1);
     
-        pb.finish_with_message("✔ All modules loaded");
+        pb.finish_with_message("[+] All modules loaded");
         println!("\r");
 
         for i in (1..=16).rev() {
-            print!("\r⏳ Waiting {:2} seconds...   ", i); 
+            print!("\r[*] Waiting {:2} seconds...   ", i);
             std::io::Write::flush(&mut std::io::stdout()).unwrap();
             thread::sleep(Duration::from_secs(1));
         }
 
-        println!("\r✅ Done!                    ");
+        println!("\r[+] Done!                    ");
 
         il2cpp::init(*UNITYPLAYER_HANDLE, *GAMEASSEMBLY_HANDLE)?;
 

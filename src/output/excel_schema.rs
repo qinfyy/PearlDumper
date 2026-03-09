@@ -201,7 +201,7 @@ fn handle_enum(runtime_type: RuntimeType) -> Result<ExcelEnum, Box<dyn Error>> {
 }
 
 pub fn excel_schema_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
-    println!("{}", "📦 Scanning and filtering classes...".green().bold());
+    println!("{}", "[*] Scanning and filtering classes...".green().bold());
     let types = mono_assembly.get_types(60 != 0)?;
     let mut data_json: ExcelSchema = ExcelSchema {
         list_path: vec![],
@@ -254,7 +254,7 @@ pub fn excel_schema_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Err
 
         pb_filter.inc(1);
     }
-    pb_filter.finish_with_message("✅ Finished scanning and filtering classes.");
+    pb_filter.finish_with_message("[+] Finished scanning and filtering classes.");
     fs::write(
         "ExcelSchema.json",
         serde_json::to_string_pretty(&data_json).unwrap(),
@@ -262,7 +262,7 @@ pub fn excel_schema_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Err
     .unwrap();
     println!(
         "{}",
-        "✅ Finished scanning and filtering classes..."
+        "[+] Finished scanning and filtering classes..."
             .green()
             .bold()
     );
