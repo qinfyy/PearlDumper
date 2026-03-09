@@ -58,7 +58,7 @@ pub fn check_fields_class(fields: &Il2CppArray) -> Result<(bool, ExcelData), Box
         for i in 0..fields.len() {
             let field = fields.get::<MonoField>(i);
             let field_name = field.get_name()?.as_str();
-            if field_name == "s_PathList" || field_name == "PIPMCNKGEKM" {
+            if field_name == "s_PathList" || field_name == "MEAAIFJAEFK" { //4.0.0
                 str_field = field.clone();
             }
         }
@@ -152,7 +152,15 @@ pub fn excel_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
             let excel_table = ExcelTable::new(key.as_str());
             excel_table.cctor()?;
             if !excel_table.is_data_loaded()? || excel_table.is_data_empty()? {
-                excel_table.load_data()?;
+                //println!("load data {}", key);
+                match excel_table.load_data() {
+                    Err(_) => {
+                        eprintln!("Failed to load_data {}", key);
+                        error_count += 1;
+                        continue;
+                    }
+                    _ => {}
+                }
             }
 
 
@@ -163,7 +171,7 @@ pub fn excel_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
                     continue;
                 }
             };
-            
+
             let res_dict = &*(dict_ptr as *const NativeDictionary<usize, usize>);
             let mut list_json: Vec<serde_json::Value> = vec![];
 
@@ -172,8 +180,24 @@ pub fn excel_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
                 for i in 0..res_dict.count as usize {
                     let entry = entries.vector[i];
                     if entry.hash_code >= 0 {
-                        let json = JsonConvert::serialize_object(entry.value)?;
-                        let value: serde_json::Value = serde_json::from_str(&json.as_str())?;
+                        //let json = JsonConvert::serialize_object(entry.value).expect("json serialize error");
+                        if !key.contains("ConstValueClientExcelTable") {
+                            match JsonConvert::serialize_object(entry.value) {
+                                Ok(json) => {
+                                    // 成功序列化时继续处理
+                                    let value: serde_json::Value = serde_json::from_str(&json.as_str())?;
+                                    list_json.push(value);
+                                }
+                                Err(_) => {
+                                    // 序列化失败时，可以选择继续
+                                    eprintln!("Failed to serialize {} entry value at index {}", key, i);
+                                    error_count += 1;
+                                    // 或者可以选择跳过这个条目，继续执行
+                                    continue;
+                                }
+                            }
+                        }
+                        //let value: serde_json::Value = serde_json::from_str(&json.as_str())?;
                         // if values.spath.contains(&String::from("MazePlane")) {
                         //     PLANES.lock().unwrap().push(value.clone());
                         // } else if values.spath.contains(&String::from("AdventurePlayer")) {
@@ -183,7 +207,7 @@ pub fn excel_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
                         // } else if values.spath.contains(&String::from("PerformanceDS")) {
                         //     PERFORMANCE_DS.lock().unwrap().push(value.clone());
                         // }
-                        list_json.push(value);
+                        //list_json.push(value);
                     }
                 }
             }

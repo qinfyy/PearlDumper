@@ -3,6 +3,7 @@ use std::{error::Error};
 use colored::Colorize;
 
 use crate::{core::{app_domain::AppDomain, assembly::MonoAssembly}, output::{cmdid::cmdid_dump, excel_schema::excel_schema_dump, proto::proto_dump}};
+use crate::output::excel::excel_dump;
 
 pub mod excel;
 pub mod proto;
@@ -60,13 +61,13 @@ pub fn init() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // println!("{}", "✅ Start dumping excel".green().bold());
-    // if let Some(excel_assembly) = excel_assembly {
-    //     match excel_dump(&excel_assembly) {
-    //         Ok(_) => println!("{}", "✅ Excel dumping success".green().bold()),
-    //         Err(e) => println!("{} {}", "Excel dumping error:".red().bold(), e),
-    //     }
-    // }
+    println!("{}", "✅ Start dumping excel".green().bold());
+    if let Some(excel_assembly) = excel_assembly {
+        match excel_dump(&excel_assembly) {
+            Ok(_) => println!("{}", "✅ Excel dumping success".green().bold()),
+            Err(e) => println!("{} {}", "Excel dumping error:".red().bold(), e),
+        }
+    }
 
     // println!("{}", "✅ Start dumping config".green().bold());
     // match config_dump() {
