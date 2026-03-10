@@ -2,8 +2,7 @@ use std::{error::Error};
 
 use colored::Colorize;
 
-use crate::{core::{app_domain::AppDomain, assembly::MonoAssembly}, output::{cmdid::cmdid_dump, excel_schema::excel_schema_dump, proto::proto_dump}};
-use crate::output::excel::excel_dump;
+use crate::{core::{app_domain::AppDomain, assembly::MonoAssembly}, output::{cmdid::cmdid_dump, excel_schema::excel_schema_dump, proto::proto_dump, excel::excel_dump}};
 
 pub mod excel;
 pub mod proto;

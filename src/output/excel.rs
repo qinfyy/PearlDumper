@@ -58,7 +58,10 @@ pub fn check_fields_class(fields: &Il2CppArray) -> Result<(bool, ExcelData), Box
         for i in 0..fields.len() {
             let field = fields.get::<MonoField>(i);
             let field_name = field.get_name()?.as_str();
-            if field_name == "s_PathList" || field_name == "MEAAIFJAEFK" { //4.0.0
+            if field_name == "s_PathList" || field_name == "PIPMCNKGEKM"  //3.8.0
+                || field_name == "MEAAIFJAEFK" //4.0.0
+                || field_name == "DLAGNOOMIAJ" //4.0.5x
+            {
                 str_field = field.clone();
             }
         }
@@ -181,9 +184,9 @@ pub fn excel_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
                     let entry = entries.vector[i];
                     if entry.hash_code >= 0 {
                         //let json = JsonConvert::serialize_object(entry.value).expect("json serialize error");
-                        if key.contains("ConstValueClientExcelTable") {
-                            continue //会崩?
-                        }
+                        // if key.contains("ConstValueClientExcelTable") {
+                        //     continue //会崩?
+                        // }
                         match JsonConvert::serialize_object(entry.value) {
                             Ok(json) => {
                                 let value: serde_json::Value = serde_json::from_str(&json.as_str())?;

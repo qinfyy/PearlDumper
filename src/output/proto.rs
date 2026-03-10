@@ -321,9 +321,10 @@ pub fn proto_dump(mono_assembly: &MonoAssembly) -> Result<(), Box<dyn Error>> {
     let mut map = get_cmdid();
     let mut error_map: HashMap<String, u16> = HashMap::new();
 
-    let class_cf =
-        //get_cached_class(&String::from("EIFPLDNKAIB")).ok_or(anyhow::anyhow!("no such class"))?; //4.0.5x
-        get_cached_class(&String::from("DHLPABNKLPL")).ok_or(anyhow::anyhow!("no such class"))?; //4.0.0
+    let class_cf = get_cached_class(&String::from("EEOLJDLOACI")) // 3.8.0
+        .or_else(|| get_cached_class(&String::from("DHLPABNKLPL"))) // 4.0.0
+        .or_else(|| get_cached_class(&String::from("EIFPLDNKAIB"))) // 4.0.5x
+        .ok_or(anyhow::anyhow!("no such class"))?;
 
     let pb2 = create_progress_bar(map.len() as u64, BLUE_PROGRESS_BAR);
 

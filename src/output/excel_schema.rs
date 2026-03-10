@@ -82,7 +82,10 @@ fn handle_path(runtime_type: RuntimeType) -> Result<ExcelPath, Box<dyn Error>> {
     for i in 0..fields.len() {
         let field= fields.get::<MonoField>(i);
         let field_name = field.get_name()?.as_str();
-        if field_name == "s_PathList" || field_name == "PIPMCNKGEKM" {
+        if field_name == "s_PathList" || field_name == "PIPMCNKGEKM" // 3.8.0
+            || field_name == "MEAAIFJAEFK" // 4.0.0
+            || field_name == "DLAGNOOMIAJ" // 4.0.5x
+        {
             unsafe {
                 let ptr: *const std::ffi::c_void = std::ptr::null();
                 let _spath = field.get_value(ptr as usize);
@@ -103,7 +106,10 @@ fn handle_path(runtime_type: RuntimeType) -> Result<ExcelPath, Box<dyn Error>> {
             }
         }
 
-        if field_name == "dataDict_" || field_name == "FHBDBNIPGAO" {
+        if field_name == "dataDict_" || field_name == "FHBDBNIPGAO" // 3.8.0
+            || field_name == "BPAFMDGKILB" // 4.0.0
+            || field_name == "JLIJNIFHLHA" // 4.0.5x
+        {
             class_name = field
                 .get_field_type()?
                 .get_il2cpp_type()

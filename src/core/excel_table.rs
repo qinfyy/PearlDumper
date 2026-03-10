@@ -75,7 +75,9 @@ impl ExcelTable {
             let class_cf = get_cached_class(&self.key).ok_or(anyhow::anyhow!("no such class"))?;
             let mt_is_empty = class_cf
                 .find_method("IsDataEmpty", &[])
+                .or_else(|| class_cf.find_method("MBALLPDOBKM", &[])) //3.8.0
                 .or_else(|| class_cf.find_method("IMIDPJAINOL", &[])) //4.0.0
+                .or_else(|| class_cf.find_method("KMLBGAIEAML", &[])) //4.0.5x
                 .ok_or(anyhow::anyhow!("no such method"))?;
 
             let func_is_empty: extern "fastcall" fn() -> bool =
@@ -104,7 +106,9 @@ impl ExcelTable {
             let class_cf = get_cached_class(&self.key).ok_or(anyhow::anyhow!("no such class"))?;
             let mt_is_loaded = class_cf
                 .find_method("IsDataLoaded", &[])
+                .or_else(|| class_cf.find_method("FKLAGBMGOJN", &[])) //3.8.0
                 .or_else(|| class_cf.find_method("KOJCECFHOIC", &[])) //4.0.0
+                .or_else(|| class_cf.find_method("HAOHLGBMOOI", &[])) //4.0.5x
                 .ok_or(anyhow::anyhow!("no such method"))?;
 
             let func_is_loaded: extern "fastcall" fn() -> bool =
@@ -133,7 +137,9 @@ impl ExcelTable {
             let class_cf = get_cached_class(&self.key).ok_or(anyhow::anyhow!("no such class"))?;
             let mt_load_data = class_cf
                 .find_method("LoadData", &[])
+                .or_else(|| class_cf.find_method("DHKGNMNOHJB", &[])) //3.8.0
                 .or_else(|| class_cf.find_method("HOIPHJHEAIC", &[])) //4.0.0
+                .or_else(|| class_cf.find_method("NNCCJOMJBJE", &[])) //4.0.5x
                 .ok_or(anyhow::anyhow!("no such method"))?;
 
             let func_load_data: extern "fastcall" fn() -> () =
@@ -162,7 +168,9 @@ impl ExcelTable {
             let class_cf = get_cached_class(&self.key).ok_or(anyhow::anyhow!("no such class"))?;
             let mt_unload_data = class_cf
                 .find_method("UnloadData", &[])
+                .or_else(|| class_cf.find_method("DHKGNMNOHJB", &[]))//3.8.0
                 .or_else(|| class_cf.find_method("MDMNPDGLJED", &[]))//4.0.0
+                .or_else(|| class_cf.find_method("BLIMEEAKBKC", &[]))//4.0.5x
                 .ok_or(anyhow::anyhow!("no such method"))?;
 
             let func_unload_data: extern "fastcall" fn() -> () =

@@ -4,27 +4,46 @@ use ctor::ctor;
 use figlet_rs::FIGfont;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::{
-    error::Error, thread, time::Duration,
+    error::Error, thread, time::Duration, ptr::null_mut
 };
 use windows::{
+    Win32::Foundation::HWND,
+    Win32::Storage::FileSystem::{CreateFileW, FILE_GENERIC_WRITE, FILE_SHARE_WRITE, OPEN_EXISTING, FILE_GENERIC_READ, FILE_SHARE_READ},
     core::{w, PCWSTR},
     Win32::System::{
-        Console::{AllocConsole, SetConsoleTitleW,GetStdHandle, SetConsoleMode, ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, ENABLE_WRAP_AT_EOL_OUTPUT, STD_OUTPUT_HANDLE},
+        Console::{AllocConsole, SetConsoleTitleW, SetStdHandle, SetConsoleMode, GetConsoleWindow, GetConsoleMode, CONSOLE_MODE,
+                  ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, ENABLE_WRAP_AT_EOL_OUTPUT, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE, STD_INPUT_HANDLE
+        },
         LibraryLoader::GetModuleHandleW
     }
 };
 
 pub fn init() -> Result<(), Box<dyn Error>> {
     unsafe {
-        AllocConsole()?;
-        let out = GetStdHandle(STD_OUTPUT_HANDLE)?;
-        SetConsoleMode(out, ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT)?;
+        if GetConsoleWindow() == HWND(null_mut()) {
+            AllocConsole()?;
+        }
+
+        let console_output_handle = CreateFileW(w!("\\\\.\\CONOUT$"), FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0,
+            FILE_SHARE_WRITE, None, OPEN_EXISTING, Default::default(), None)?;
+
+        let console_input_handle = CreateFileW(w!("\\\\.\\CONIN$"), FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0,
+            FILE_SHARE_READ, None, OPEN_EXISTING, Default::default(), None)?;
+
+        SetStdHandle(STD_OUTPUT_HANDLE, console_output_handle)?;
+        SetStdHandle(STD_ERROR_HANDLE, console_output_handle)?;
+        SetStdHandle(STD_INPUT_HANDLE, console_input_handle)?;
+
+        let mut mode = CONSOLE_MODE(0);
+        GetConsoleMode(console_output_handle, &mut mode)?;
+        mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT;
+        SetConsoleMode(console_output_handle, mode)?;
 
         let title = "Castorice Dumper";
         let wide: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
         let _ = SetConsoleTitleW(PCWSTR(wide.as_ptr()));
 
-        let standard_font = FIGfont::standard().unwrap();
+        let standard_font = FIGfont::standard()?;
         let figure = standard_font.convert("Castorice Dumper").unwrap();
 
         println!("{}", figure.to_string().blue().bold());
