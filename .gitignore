@@ -3,6 +3,9 @@
 
 # Output files
 /output
+/DUMP
+__pycache__/
+*.pyc
 
 .idea/
 .history/

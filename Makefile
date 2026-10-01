@@ -1,12 +1,15 @@
 # Makefile
 
-.PHONY: build clean run
+.PHONY: build check test clean
 
 build:
-	cargo build --release
+	cargo build --release --locked
+
+check:
+	cargo check --workspace --locked
+
+test:
+	cargo test --workspace --locked
 
 clean:
 	cargo clean
-
-run:
-	cargo run --release

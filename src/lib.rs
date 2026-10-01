@@ -1,7 +1,7 @@
-#![allow(unsupported_calling_conventions)]
+#[cfg(not(test))]
+mod entry;
+#[cfg(not(test))]
+mod logging;
 
-pub mod entry;
-pub mod il2cpp;
-pub mod core;
-pub mod output;
-pub mod module;
+pub use dumper;
+pub use il2cpp;

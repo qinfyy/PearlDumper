@@ -1,99 +1,123 @@
-use crate::{il2cpp, module::{GAMEASSEMBLY_HANDLE, UNITYPLAYER_HANDLE}, output};
-use colored::Colorize;
-use ctor::ctor;
-use figlet_rs::FIGfont;
-use indicatif::{ProgressBar, ProgressStyle};
 use std::{
-    error::Error, thread, time::Duration, ptr::null_mut
+    ffi::c_void,
+    panic::{AssertUnwindSafe, catch_unwind},
+    time::{Duration, Instant},
 };
 use windows::{
-    Win32::Foundation::HWND,
-    Win32::Storage::FileSystem::{CreateFileW, FILE_GENERIC_WRITE, FILE_SHARE_WRITE, OPEN_EXISTING, FILE_GENERIC_READ, FILE_SHARE_READ},
-    core::{w, PCWSTR},
-    Win32::System::{
-        Console::{AllocConsole, SetConsoleTitleW, SetStdHandle, SetConsoleMode, GetConsoleWindow, GetConsoleMode, CONSOLE_MODE,
-                  ENABLE_PROCESSED_OUTPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, ENABLE_WRAP_AT_EOL_OUTPUT, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE, STD_INPUT_HANDLE
+    Win32::{
+        Foundation::{CloseHandle, HINSTANCE, HMODULE},
+        System::{
+            Console::{AllocConsole, SetConsoleTitleW},
+            LibraryLoader::{DisableThreadLibraryCalls, GetModuleFileNameW, GetModuleHandleW},
+            SystemServices::DLL_PROCESS_ATTACH,
+            Threading::{CreateThread, THREAD_CREATION_FLAGS},
         },
-        LibraryLoader::GetModuleHandleW
-    }
+    },
+    core::w,
 };
 
-pub fn init() -> Result<(), Box<dyn Error>> {
+fn run(module: *mut c_void) -> anyhow::Result<()> {
+    crate::logging::init()?;
     unsafe {
-        if GetConsoleWindow() == HWND(null_mut()) {
-            AllocConsole()?;
-        }
-
-        let console_output_handle = CreateFileW(w!("\\\\.\\CONOUT$"), FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0,
-            FILE_SHARE_WRITE, None, OPEN_EXISTING, Default::default(), None)?;
-
-        let console_input_handle = CreateFileW(w!("\\\\.\\CONIN$"), FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0,
-            FILE_SHARE_READ, None, OPEN_EXISTING, Default::default(), None)?;
-
-        SetStdHandle(STD_OUTPUT_HANDLE, console_output_handle)?;
-        SetStdHandle(STD_ERROR_HANDLE, console_output_handle)?;
-        SetStdHandle(STD_INPUT_HANDLE, console_input_handle)?;
-
-        let mut mode = CONSOLE_MODE(0);
-        GetConsoleMode(console_output_handle, &mut mode)?;
-        mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT;
-        SetConsoleMode(console_output_handle, mode)?;
-
-        let title = "Castorice Dumper";
-        let wide: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
-        let _ = SetConsoleTitleW(PCWSTR(wide.as_ptr()));
-
-        let standard_font = FIGfont::standard()?;
-        let figure = standard_font.convert("Castorice Dumper").unwrap();
-
-        println!("{}", figure.to_string().blue().bold());
-
-        let pb = ProgressBar::new(2);
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} • {msg}",
-            )
-            .unwrap()
-            .progress_chars("#>-"),
-        );
-    
-        pb.set_message("Waiting for GameAssembly...");
-        while GetModuleHandleW(w!("GameAssembly")).is_err() {
-            thread::sleep(Duration::from_millis(10));
-        }
-        pb.inc(1);
-
-        pb.set_message("Waiting for UnityPlayer...");
-        while GetModuleHandleW(w!("UnityPlayer")).is_err() {
-            thread::sleep(Duration::from_millis(10));
-        }
-        pb.inc(1);
-    
-        pb.finish_with_message("[+] All modules loaded");
-        println!("\r");
-
-        for i in (1..=16).rev() {
-            print!("\r[*] Waiting {:2} seconds...   ", i);
-            std::io::Write::flush(&mut std::io::stdout()).unwrap();
-            thread::sleep(Duration::from_secs(1));
-        }
-
-        println!("\r[+] Done!                    ");
-
-        il2cpp::init(*UNITYPLAYER_HANDLE, *GAMEASSEMBLY_HANDLE)?;
-
-        println!("{}", "Dumping...".green().bold());
-        match output::init() {
-            Ok(_) => {}
-            Err(e) => eprintln!("Error: {}", e),
-        }
+        let _ = AllocConsole();
+        let _ = SetConsoleTitleW(w!("Castorice Dumper 4.6.51"));
     }
+    log::info!("Castorice Dumper: target 4.6.51");
+    let build = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    log::info!(
+        "Build={build}, pid={}, cwd={}",
+        std::process::id(),
+        std::env::current_dir()?.display()
+    );
+    let mut path = vec![0u16; 32768];
+    let length = unsafe { GetModuleFileNameW(Some(HMODULE(module)), &mut path) } as usize;
+    if length > 0 && length < path.len() {
+        log::info!(
+            "Loaded dumper: {}",
+            String::from_utf16_lossy(&path[..length])
+        );
+    } else {
+        log::warn!(
+            "Cannot resolve dumper module path at 0x{:X}",
+            module as usize
+        );
+    }
+    if cfg!(debug_assertions) {
+        log::warn!(
+            "Debug build: large metadata scans may be slow; use a release build for full exports"
+        );
+    }
+    let started = Instant::now();
+    let mut last_progress = started;
+    log::info!("Waiting for GameAssembly.dll and UnityPlayer.dll (timeout 120s)");
+    while unsafe { GetModuleHandleW(w!("GameAssembly.dll")) }.is_err()
+        || unsafe { GetModuleHandleW(w!("UnityPlayer.dll")) }.is_err()
+    {
+        anyhow::ensure!(
+            started.elapsed() < Duration::from_secs(120),
+            "timed out waiting for game modules"
+        );
+        if last_progress.elapsed() >= Duration::from_secs(2) {
+            log::info!(
+                "Still waiting for game modules after {:.1}s",
+                started.elapsed().as_secs_f64()
+            );
+            last_progress = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    log::info!(
+        "Game modules loaded in {:.2}s",
+        started.elapsed().as_secs_f64()
+    );
+    dumper::run()?;
+    log::info!("Dump finished; output: DUMP");
     Ok(())
 }
 
-#[ctor]
-fn entry() {
-    thread::spawn(|| {
-        init().unwrap_or_else(|e| panic!("castorice-dumper encountered an error: {}", e));
-    });
+unsafe extern "system" fn worker(module: *mut c_void) -> u32 {
+    let result = microseh::try_seh(|| catch_unwind(AssertUnwindSafe(|| run(module))));
+    match result {
+        Ok(Ok(Ok(()))) => 0,
+        Ok(Ok(Err(error))) => {
+            log::error!("Stopped: {error:#}");
+            1
+        }
+        Ok(Err(_)) => {
+            log::error!("Stopped after a Rust panic");
+            1
+        }
+        Err(error) => {
+            log::error!("Stopped after a native exception: {error:?}");
+            1
+        }
+    }
+}
+
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn DllMain(instance: HINSTANCE, reason: u32, _: *mut c_void) -> i32 {
+    if reason == DLL_PROCESS_ATTACH {
+        unsafe {
+            let _ = DisableThreadLibraryCalls(instance.into());
+            match CreateThread(
+                None,
+                0,
+                Some(worker),
+                Some(instance.0),
+                THREAD_CREATION_FLAGS(0),
+                None,
+            ) {
+                Ok(handle) => {
+                    let _ = CloseHandle(handle);
+                }
+                Err(_) => return 0,
+            }
+        }
+    }
+    1
 }

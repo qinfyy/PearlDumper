@@ -1,0 +1,12 @@
+[package]
+name = "utils"
+version.workspace = true
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+windows.workspace = true
+ilhook.workspace = true
+patternscan.workspace = true
+log.workspace = true
+microseh.workspace = true
