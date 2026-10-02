@@ -1,8 +1,9 @@
 use std::{
     borrow::Cow,
     collections::HashMap,
-    io::{self, Write},
+    io::Write,
     sync::LazyLock,
+    time::{Duration, Instant},
 };
 
 use cache::{CachedType, TypeCache};
@@ -23,6 +24,7 @@ mod nt;
 mod output;
 mod proto_asm_parser;
 mod proto_stream;
+mod type_references;
 pub mod util;
 mod write_to;
 
@@ -346,19 +348,36 @@ pub fn dump<W: Write>(
     cmdid_out: &mut W,
     dump_mode: ProtoDumpMode,
     enable_logging: bool,
-) -> io::Result<()> {
+) -> anyhow::Result<()> {
+    let started = Instant::now();
+    let request_scan = nt::prepare_request_scan()?;
     let type_cache = TypeCache::init();
     if matches!(dump_mode, ProtoDumpMode::MergeFrom | ProtoDumpMode::WriteTo) {
         proto_stream::init();
     }
 
-    log::debug!("[Proto Dumper] dumping minimal proto infos...");
+    log::info!("Recovering protobuf message fields");
+    let mut last_progress = Instant::now();
 
     let mut minimal_info_map = HashMap::<RuntimeType, MessageMinimalInfo>::new();
+    log::info!("Recovering response and notification packet IDs");
     let mut rsp_notify_map = nt::get_rsp_notify_map();
+    log::info!(
+        "Recovered {} response and notification packet IDs",
+        rsp_notify_map.len()
+    );
     let mut req_map = HashMap::<RuntimeType, (u16, Option<String>)>::new();
 
     for i in unsafe { il2cpp::RPG_NETWORK_PROTO_START }..unsafe { il2cpp::RPG_NETWORK_PROTO_END } {
+        if last_progress.elapsed() >= Duration::from_secs(2) {
+            log::info!(
+                "Protocol fields: type index {i}/{}, {} messages, {:.1}s elapsed",
+                unsafe { il2cpp::RPG_NETWORK_PROTO_END },
+                minimal_info_map.len(),
+                started.elapsed().as_secs_f64()
+            );
+            last_progress = Instant::now();
+        }
         let proto_class = metadata_cache::get_typeinfo_from_typedefindex(i);
         let proto_type = RuntimeType::from_class(proto_class).unwrap();
 
@@ -428,9 +447,17 @@ pub fn dump<W: Write>(
         minimal_info_map.insert(proto_type, message_info);
     }
 
-    log::debug!("[Proto Dumper] generating nt...");
+    log::info!(
+        "Recovered fields for {} protobuf messages; recovering packet IDs",
+        minimal_info_map.len()
+    );
 
-    let req_rvas = nt::get_req_map(&minimal_info_map, &rsp_notify_map, &mut req_map);
+    let req_rvas = nt::get_req_map(
+        &request_scan,
+        &minimal_info_map,
+        &rsp_notify_map,
+        &mut req_map,
+    )?;
     let req_named_count = req_map.values().filter(|(_, name)| name.is_some()).count();
     log::debug!(
         "[Proto Dumper] req nt: req={}, nt={}",

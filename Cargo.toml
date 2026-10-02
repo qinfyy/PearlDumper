@@ -16,10 +16,12 @@ version = "0.1.0"
 
 [workspace.dependencies]
 anyhow = "1.0.102"
+ansi_term = "0.12.1"
 base64 = "0.22.1"
 bitflags = "2.13.0"
 byteorder = "1.5.0"
 convert_case = "0.11.0"
+env_logger = "0.11.10"
 iced-x86 = "1.21.0"
 ilhook = "2.3.0"
 indexmap = { version = "2.14.0", features = ["serde"] }
@@ -30,6 +32,7 @@ paste = "1.0.15"
 patternscan = "1.2.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.150", features = ["preserve_order"] }
+tracing = { version = "0.1.44", features = ["log"] }
 ureq = { version = "3.3.0", features = ["rustls"] }
 syn = { version = "2.0.100", features = ["full"] }
 windows = { version = "0.62.2", features = [
@@ -45,9 +48,12 @@ dahlah-derive = { path = "crates/derive" }
 
 [dependencies]
 anyhow.workspace = true
+ansi_term.workspace = true
+env_logger.workspace = true
 il2cpp.workspace = true
 log.workspace = true
 microseh.workspace = true
+tracing.workspace = true
 windows.workspace = true
 dumper = { path = "crates/dumper" }
 

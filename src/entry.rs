@@ -17,18 +17,18 @@ use windows::{
 };
 
 fn run(module: *mut c_void) -> anyhow::Result<()> {
-    crate::logging::init()?;
     unsafe {
         let _ = AllocConsole();
         let _ = SetConsoleTitleW(w!("Castorice Dumper 4.6.51"));
     }
-    log::info!("Castorice Dumper: target 4.6.51");
+    crate::logging::init()?;
+    tracing::info!("Castorice Dumper: target 4.6.51");
     let build = if cfg!(debug_assertions) {
         "debug"
     } else {
         "release"
     };
-    log::info!(
+    tracing::info!(
         "Build={build}, pid={}, cwd={}",
         std::process::id(),
         std::env::current_dir()?.display()
@@ -36,24 +36,24 @@ fn run(module: *mut c_void) -> anyhow::Result<()> {
     let mut path = vec![0u16; 32768];
     let length = unsafe { GetModuleFileNameW(Some(HMODULE(module)), &mut path) } as usize;
     if length > 0 && length < path.len() {
-        log::info!(
+        tracing::info!(
             "Loaded dumper: {}",
             String::from_utf16_lossy(&path[..length])
         );
     } else {
-        log::warn!(
+        tracing::warn!(
             "Cannot resolve dumper module path at 0x{:X}",
             module as usize
         );
     }
     if cfg!(debug_assertions) {
-        log::warn!(
+        tracing::warn!(
             "Debug build: large metadata scans may be slow; use a release build for full exports"
         );
     }
     let started = Instant::now();
     let mut last_progress = started;
-    log::info!("Waiting for GameAssembly.dll and UnityPlayer.dll (timeout 120s)");
+    tracing::info!("Waiting for GameAssembly.dll and UnityPlayer.dll (timeout 120s)");
     while unsafe { GetModuleHandleW(w!("GameAssembly.dll")) }.is_err()
         || unsafe { GetModuleHandleW(w!("UnityPlayer.dll")) }.is_err()
     {
@@ -62,7 +62,7 @@ fn run(module: *mut c_void) -> anyhow::Result<()> {
             "timed out waiting for game modules"
         );
         if last_progress.elapsed() >= Duration::from_secs(2) {
-            log::info!(
+            tracing::info!(
                 "Still waiting for game modules after {:.1}s",
                 started.elapsed().as_secs_f64()
             );
@@ -70,12 +70,12 @@ fn run(module: *mut c_void) -> anyhow::Result<()> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    log::info!(
+    tracing::info!(
         "Game modules loaded in {:.2}s",
         started.elapsed().as_secs_f64()
     );
     dumper::run()?;
-    log::info!("Dump finished; output: DUMP");
+    tracing::info!("Dump finished; output: DUMP");
     Ok(())
 }
 
@@ -84,15 +84,15 @@ unsafe extern "system" fn worker(module: *mut c_void) -> u32 {
     match result {
         Ok(Ok(Ok(()))) => 0,
         Ok(Ok(Err(error))) => {
-            log::error!("Stopped: {error:#}");
+            tracing::error!("Stopped: {error:#}");
             1
         }
         Ok(Err(_)) => {
-            log::error!("Stopped after a Rust panic");
+            tracing::error!("Stopped after a Rust panic");
             1
         }
         Err(error) => {
-            log::error!("Stopped after a native exception: {error:?}");
+            tracing::error!("Stopped after a native exception: {error:?}");
             1
         }
     }

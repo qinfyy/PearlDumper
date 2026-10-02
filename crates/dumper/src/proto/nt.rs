@@ -1,13 +1,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::{Duration, Instant};
 
-use crate::{
-    proto::{
-        FIGHT_GAME_SEND, IL2CPP_OBJECT_NEW_RVA, MessageMinimalInfo, NETWORK_MANAGER_SEND_NAME,
-        NETWORK_MANAGER_SEND_VA, XLUA_OBJECT_TRANSLATOR_DELEGATE,
-        XLUA_OBJECT_TRANSLATOR_METHOD_CLASS, XLUA_OBJECT_TRANSLATOR_STATIC_FIELDS_CLASS,
-        XLUA_REGISTER_OBJECT_RVA,
-    },
-    script::TYPE_INFOS,
+use anyhow::Context;
+
+use crate::proto::{
+    FIGHT_GAME_SEND, IL2CPP_OBJECT_NEW_RVA, MessageMinimalInfo, NETWORK_MANAGER_SEND_NAME,
+    NETWORK_MANAGER_SEND_VA, XLUA_OBJECT_TRANSLATOR_DELEGATE, XLUA_OBJECT_TRANSLATOR_METHOD_CLASS,
+    XLUA_OBJECT_TRANSLATOR_STATIC_FIELDS_CLASS, XLUA_REGISTER_OBJECT_RVA,
 };
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 use il2cpp::vm::method::Il2CppMethod;
@@ -22,6 +21,8 @@ use il2cpp::{
 use reflection::{field_info::FieldInfo, runtime_type::RuntimeType};
 use std::borrow::Cow;
 use utils::game_assembly_slice;
+
+use super::type_references::TypeReferences;
 
 pub fn get_rsp_notify_map() -> HashMap<RuntimeType, u16> {
     let mut process = false;
@@ -65,16 +66,39 @@ pub fn get_rsp_notify_map() -> HashMap<RuntimeType, u16> {
     HashMap::new()
 }
 
-fn get_req_method_va_name_map() -> HashMap<usize, String> {
+fn get_req_method_va_name_map(
+    references: &TypeReferences,
+) -> anyhow::Result<HashMap<usize, String>> {
     let mut output = HashMap::new();
-
-    let mappings = disasm_obf_deobf_method_by_xlua_obj_translator();
-    let mut unique_methods = HashMap::<Cow<'static, str>, Vec<Il2CppMethod>>::new();
-    FUNCTIONS_TABLE_REFLECTION
+    let methods = FUNCTIONS_TABLE_REFLECTION
         .get()
-        .unwrap()
-        .iter()
-        .for_each(|v| unique_methods.entry(v.1.get_name()).or_default().push(*v.1));
+        .context("IL2CPP reflection method cache is not initialized")?;
+    log::info!(
+        "Indexing {} cached methods for XLua name recovery",
+        methods.len()
+    );
+    let started = Instant::now();
+    let mut last_progress = started;
+    let mut known_methods = HashMap::<usize, Cow<'static, str>>::new();
+    let mut unique_methods = HashMap::<Cow<'static, str>, Vec<Il2CppMethod>>::new();
+    for (index, method) in methods.values().enumerate() {
+        if index % 256 == 0 && last_progress.elapsed() >= Duration::from_secs(2) {
+            log::info!(
+                "XLua method index: {index}/{} methods, {:.1}s elapsed",
+                methods.len(),
+                started.elapsed().as_secs_f64()
+            );
+            last_progress = Instant::now();
+        }
+        let name = method.get_name();
+        known_methods.insert(method.0, name.clone());
+        unique_methods.entry(name).or_default().push(*method);
+    }
+    log::info!(
+        "XLua method index ready in {:.2}s",
+        started.elapsed().as_secs_f64()
+    );
+    let mappings = disasm_obf_deobf_method_by_xlua_obj_translator(references, &known_methods)?;
 
     for (obf, deobf) in mappings {
         if !deobf.ends_with("Req") {
@@ -94,44 +118,48 @@ fn get_req_method_va_name_map() -> HashMap<usize, String> {
         }
     }
 
-    output
+    Ok(output)
 }
 
-fn disasm_obf_deobf_method_by_xlua_obj_translator() -> HashMap<String, String> {
+fn disasm_obf_deobf_method_by_xlua_obj_translator(
+    references: &TypeReferences,
+    known_methods: &HashMap<usize, Cow<'static, str>>,
+) -> anyhow::Result<HashMap<String, String>> {
     let mut output = HashMap::new();
 
-    let delegate_class = get_cached_class(&XLUA_OBJECT_TRANSLATOR_DELEGATE).unwrap();
-    let delegate_type_rva = *TYPE_INFOS.get().unwrap().get(&delegate_class).unwrap();
+    let delegate_class = get_cached_class(&XLUA_OBJECT_TRANSLATOR_DELEGATE).ok_or_else(|| {
+        anyhow::anyhow!(
+            "missing XLua delegate class {}",
+            *XLUA_OBJECT_TRANSLATOR_DELEGATE
+        )
+    })?;
 
-    let obj_translator_fields_class =
-        get_cached_class(&XLUA_OBJECT_TRANSLATOR_STATIC_FIELDS_CLASS).unwrap();
+    let obj_translator_fields_class = get_cached_class(&XLUA_OBJECT_TRANSLATOR_STATIC_FIELDS_CLASS)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "missing XLua static field class {}",
+                *XLUA_OBJECT_TRANSLATOR_STATIC_FIELDS_CLASS
+            )
+        })?;
     let obj_translator_fields = obj_translator_fields_class
         .get_fields()
         .into_iter()
         .map(|v| {
-            (
-                v.offset(),
-                strip_prefixes(
-                    FieldInfo::from_il2cpp_field(v)
-                        .unwrap()
-                        .get_name()
-                        .unwrap()
-                        .as_str()
-                        .split_once("__")
-                        .map(|(_, rest)| rest)
-                        .unwrap(),
-                    &["Send"],
-                )
-                .to_string(),
-            )
+            let name = FieldInfo::from_il2cpp_field(v)?.get_name()?.as_str();
+            let (_, suffix) = name
+                .split_once("__")
+                .ok_or_else(|| anyhow::anyhow!("unsupported XLua delegate field name {name}"))?;
+            Ok((v.offset(), strip_prefixes(suffix, &["Send"]).to_string()))
         })
-        .collect::<HashMap<_, _>>();
+        .collect::<anyhow::Result<HashMap<_, _>>>()?;
 
     let slice = game_assembly_slice();
     let xlua_register_object_rva = *XLUA_REGISTER_OBJECT_RVA;
     let mut decoder = Decoder::with_ip(
         64,
-        &slice[xlua_register_object_rva..],
+        slice
+            .get(xlua_register_object_rva..)
+            .context("XLua registration RVA is outside GameAssembly")?,
         *GA_BASE as u64 + xlua_register_object_rva as u64,
         DecoderOptions::NONE,
     );
@@ -142,6 +170,10 @@ fn disasm_obf_deobf_method_by_xlua_obj_translator() -> HashMap<String, String> {
     let mut static_field_offset = None;
     let mut push_cnt = 0;
     let mut past_prologue = false;
+    let mut delegate_loads = 0;
+    let mut null_method_refs = 0;
+    let mut unknown_method_refs = 0;
+    log::info!("Scanning XLua registration method at RVA 0x{xlua_register_object_rva:X}");
 
     while decoder.can_decode() {
         decoder.decode_out(&mut instruction);
@@ -159,11 +191,10 @@ fn disasm_obf_deobf_method_by_xlua_obj_translator() -> HashMap<String, String> {
         }
 
         // mov rcx, cs:XLUA_DELEGATE_TYPE_INFO_VA
-        if instruction.mnemonic() == Mnemonic::Mov
-            && instruction.op0_register() == Register::RCX
-            && instruction.op1_kind() == OpKind::Memory
-            && instruction.memory_displacement64() == (delegate_type_rva + *il2cpp::GA_BASE) as u64
+        if instruction.op0_register() == Register::RCX
+            && references.class_from_load(&instruction) == Some(delegate_class)
         {
+            delegate_loads += 1;
             // traverse to find the displacement register
             let mut found_offset = None;
             for i in (0..instructions.len()).rev() {
@@ -206,21 +237,27 @@ fn disasm_obf_deobf_method_by_xlua_obj_translator() -> HashMap<String, String> {
             decoder.decode_out(&mut instruction);
 
             // mov rax, cs::METHOD_INFO_VA
-            if instruction.mnemonic() == Mnemonic::Mov && instruction.op1_kind() == OpKind::Memory {
-                let type_va = instruction.memory_displacement64() as usize;
-
-                let method = unsafe { *(type_va as *const Il2CppMethod) };
-                if method.0 == 0 {
+            if let Some(type_va) = references.slot_address(&instruction) {
+                let method = unsafe { utils::memory::read::<usize>(type_va) }
+                    .with_context(|| format!("reading XLua method reference at 0x{type_va:X}"))?;
+                if method == 0 {
+                    null_method_refs += 1;
                     static_field_offset = None;
                     continue;
                 }
+                let Some(name) = known_methods.get(&method) else {
+                    unknown_method_refs += 1;
+                    log::debug!(
+                        "Skipping unknown XLua method reference 0x{method:X} at 0x{type_va:X}"
+                    );
+                    static_field_offset = None;
+                    continue;
+                };
 
                 let Some(field_name) = obj_translator_fields.get(&(offset as usize)) else {
                     static_field_offset = None;
                     continue;
                 };
-
-                let name = method.get_name();
 
                 output.insert(name.to_string(), field_name.to_string());
                 static_field_offset = None;
@@ -229,45 +266,94 @@ fn disasm_obf_deobf_method_by_xlua_obj_translator() -> HashMap<String, String> {
             continue;
         }
 
+        if instructions.len() == 500 {
+            instructions.pop_front();
+        }
         instructions.push_back(instruction);
     }
 
-    output
+    log::info!(
+        "XLua reference scan: {delegate_loads} delegate loads, {} names, {null_method_refs} null method references, {unknown_method_refs} unknown method references",
+        output.len()
+    );
+    anyhow::ensure!(
+        !output.is_empty(),
+        "no XLua request-name mappings recovered at RVA 0x{xlua_register_object_rva:X} ({delegate_loads} delegate loads, {null_method_refs} null and {unknown_method_refs} unknown method references); metadata usages may not be initialized or the registration layout is unsupported"
+    );
+    log::info!("Recovered {} XLua delegate names", output.len());
+    Ok(output)
 }
 
-pub fn get_req_map(
+pub(super) struct RequestScan {
+    references: TypeReferences,
+    targets: HashMap<usize, ReqFlavor>,
+    method_names: HashMap<usize, String>,
+}
+
+pub(super) fn prepare_request_scan() -> anyhow::Result<RequestScan> {
+    log::info!(
+        "Preparing request scan from live IL2CPP class references (no script TYPE_INFOS required)"
+    );
+    let references = TypeReferences::from_runtime()?;
+    let signature = format!(
+        "RPG.Client.NetworkManager::{}(System.UInt16,Google.Protobuf.IMessage,System.Boolean)",
+        *NETWORK_MANAGER_SEND_NAME
+    );
+    let send = get_native_method(&signature)
+        .ok_or_else(|| anyhow::anyhow!("missing request send method {signature}"))?
+        .checked_va()?;
+    let targets = HashMap::from([
+        (send, ReqFlavor::Standard),
+        (*NETWORK_MANAGER_SEND_VA, ReqFlavor::Standard),
+        (*FIGHT_GAME_SEND, ReqFlavor::Fight),
+    ]);
+    for (&address, flavor) in &targets {
+        anyhow::ensure!(
+            utils::memory::is_executable(address),
+            "invalid {flavor:?} request send address 0x{address:X}"
+        );
+        log::info!("Request send target {flavor:?}: 0x{address:X}");
+    }
+    log::info!("Recovering XLua request method names");
+    let method_names = get_req_method_va_name_map(&references)?;
+    log::info!(
+        "Request scan ready: {} send targets, {} named methods",
+        targets.len(),
+        method_names.len()
+    );
+    Ok(RequestScan {
+        references,
+        targets,
+        method_names,
+    })
+}
+
+pub(super) fn get_req_map(
+    scan: &RequestScan,
     minimal_info: &HashMap<RuntimeType, MessageMinimalInfo>,
     rsp_notify_map: &HashMap<RuntimeType, u16>,
     req_map: &mut HashMap<RuntimeType, (u16, Option<String>)>,
-) -> HashMap<RuntimeType, Vec<String>> {
-    let type_info_rvas = minimal_info
-        .iter()
-        .filter(|(ty, _)| !ty.get_isenum().unwrap().unbox() && !rsp_notify_map.contains_key(ty))
-        .filter_map(|(ty, _)| {
-            TYPE_INFOS
-                .get()
-                .unwrap()
-                .get(&ty.get_il2cpp_type().get_class())
-                .copied()
-        })
-        .collect::<HashSet<_>>();
-
-    let networkmanager_send_va = get_native_method(&format!(
-        "RPG.Client.NetworkManager::{}(System.UInt16,Google.Protobuf.IMessage,System.Boolean)",
-        *NETWORK_MANAGER_SEND_NAME
-    ))
-    .unwrap()
-    .va();
-    let networkmanager_send_va2 = *NETWORK_MANAGER_SEND_VA;
-    let networkmanager_send_va3 = *FIGHT_GAME_SEND;
-
-    let mut targets = HashMap::with_capacity(3);
-
-    targets.insert(networkmanager_send_va, ReqFlavor::Standard);
-    targets.insert(networkmanager_send_va2, ReqFlavor::Standard);
-    targets.insert(networkmanager_send_va3, ReqFlavor::Fight);
-
-    disasm_all_req(&type_info_rvas, targets, rsp_notify_map, req_map)
+) -> anyhow::Result<HashMap<RuntimeType, Vec<String>>> {
+    let mut request_classes = HashMap::new();
+    for ty in minimal_info.keys() {
+        if !rsp_notify_map.contains_key(ty) && !ty.get_isenum()?.unbox() {
+            request_classes.insert(ty.get_il2cpp_type().get_class(), *ty);
+        }
+    }
+    anyhow::ensure!(
+        !request_classes.is_empty(),
+        "no request message classes available for packet ID recovery"
+    );
+    log::info!(
+        "Scanning native send calls for {} request classes",
+        request_classes.len()
+    );
+    let rvas = disasm_all_req(scan, &request_classes, rsp_notify_map, req_map);
+    anyhow::ensure!(
+        !req_map.is_empty(),
+        "no request packet IDs recovered from live type references; metadata usages may not be initialized or the send-call layout is unsupported"
+    );
+    Ok(rvas)
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
@@ -277,12 +363,14 @@ enum ReqFlavor {
 }
 
 fn disasm_all_req(
-    type_info_rvas: &HashSet<usize>,
-    targets: HashMap<usize, ReqFlavor>,
+    scan: &RequestScan,
+    request_classes: &HashMap<Il2CppClass, RuntimeType>,
     rsp_notify_map: &HashMap<RuntimeType, u16>,
     out: &mut HashMap<RuntimeType, (u16, Option<String>)>,
 ) -> HashMap<RuntimeType, Vec<String>> {
-    let va_deobf_map = get_req_method_va_name_map();
+    let va_deobf_map = &scan.method_names;
+    let started = Instant::now();
+    let mut last_progress = started;
     let mut instruction = Instruction::default();
     let mut instructions = VecDeque::<Instruction>::with_capacity(500);
     let mut req_rvas: HashMap<RuntimeType, Vec<String>> = HashMap::new();
@@ -321,11 +409,29 @@ fn disasm_all_req(
     type CandidateInfo = (HashSet<u16>, HashSet<Option<String>>, Vec<String>);
     let mut candidates: HashMap<RuntimeType, CandidateInfo> = HashMap::new();
     for (rva, bytes) in utils::scanner::game_assembly_code_sections() {
+        log::info!(
+            "Scanning executable region at RVA 0x{rva:X}: {} bytes",
+            bytes.len()
+        );
         let mut decoder =
             Decoder::with_ip(64, bytes, (*GA_BASE + rva) as u64, DecoderOptions::NONE);
         let mut cur_func_va = None;
+        let mut next_progress_position = 65_536;
         instructions.clear();
         while decoder.can_decode() {
+            if decoder.position() >= next_progress_position {
+                if last_progress.elapsed() >= Duration::from_secs(2) {
+                    log::info!(
+                        "Request scan: region RVA 0x{rva:X}, {}/{} bytes, {} candidate types, {:.1}s elapsed",
+                        decoder.position(),
+                        bytes.len(),
+                        candidates.len(),
+                        started.elapsed().as_secs_f64()
+                    );
+                    last_progress = Instant::now();
+                }
+                next_progress_position = decoder.position().saturating_add(65_536);
+            }
             decoder.decode_out(&mut instruction);
 
             if instruction.mnemonic() == Mnemonic::Push
@@ -337,7 +443,9 @@ fn disasm_all_req(
             }
 
             if (instruction.mnemonic() == Mnemonic::Jmp || instruction.mnemonic() == Mnemonic::Call)
-                && let Some(&flavor) = targets.get(&(instruction.near_branch_target() as usize))
+                && let Some(&flavor) = scan
+                    .targets
+                    .get(&(instruction.near_branch_target() as usize))
             {
                 let mut obj_register = None;
                 let mut cmd_id = None;
@@ -432,24 +540,23 @@ fn disasm_all_req(
                                 || inst.mnemonic() == Mnemonic::Jmp)
                         {
                             let target_va = inst.near_branch_target() as usize;
-                            if target_va - *GA_BASE == *IL2CPP_OBJECT_NEW_RVA {
-                                let va = instructions[i - 1].memory_displacement64() as usize;
-                                if type_info_rvas.contains(&(va - *GA_BASE)) {
-                                    let class = unsafe { *(va as *const Il2CppClass) };
-                                    if let Ok(rt) = RuntimeType::from_class(class) {
-                                        let deobf_name = cur_func_va
-                                            .and_then(|v| va_deobf_map.get(&(v as usize)).cloned());
-                                        let entry = candidates.entry(rt).or_insert_with(|| {
-                                            (HashSet::new(), HashSet::new(), Vec::new())
-                                        });
-                                        entry.0.insert(cmd_id);
-                                        entry.1.insert(deobf_name);
-                                        if let Some(prva) = push_rva {
-                                            entry.2.push(format!("0x{prva:X}"));
-                                        }
-                                        break;
-                                    }
+                            if target_va.checked_sub(*GA_BASE) == Some(*IL2CPP_OBJECT_NEW_RVA)
+                                && let Some(previous) =
+                                    i.checked_sub(1).map(|index| &instructions[index])
+                                && let Some(class) = scan.references.class_from_load(previous)
+                                && let Some(&rt) = request_classes.get(&class)
+                            {
+                                let deobf_name = cur_func_va
+                                    .and_then(|v| va_deobf_map.get(&(v as usize)).cloned());
+                                let entry = candidates.entry(rt).or_insert_with(|| {
+                                    (HashSet::new(), HashSet::new(), Vec::new())
+                                });
+                                entry.0.insert(cmd_id);
+                                entry.1.insert(deobf_name);
+                                if let Some(prva) = push_rva {
+                                    entry.2.push(format!("0x{prva:X}"));
                                 }
+                                break;
                             }
                         }
 
@@ -470,24 +577,21 @@ fn disasm_all_req(
                                     if prev.mnemonic() == Mnemonic::Mov
                                         && prev.op0_register() == type_info_reg
                                     {
-                                        let va = prev.memory_displacement64() as usize;
-                                        if type_info_rvas.contains(&(va - *GA_BASE)) {
-                                            let class = unsafe { *(va as *const Il2CppClass) };
-                                            if let Ok(rt) = RuntimeType::from_class(class) {
-                                                let deobf_name = cur_func_va.and_then(|v| {
-                                                    va_deobf_map.get(&(v as usize)).cloned()
-                                                });
-                                                let entry =
-                                                    candidates.entry(rt).or_insert_with(|| {
-                                                        (HashSet::new(), HashSet::new(), Vec::new())
-                                                    });
-                                                entry.0.insert(cmd_id);
-                                                entry.1.insert(deobf_name);
-                                                if let Some(prva) = push_rva {
-                                                    entry.2.push(format!("0x{prva:X}"));
-                                                }
-                                                break;
+                                        if let Some(class) = scan.references.class_from_load(&prev)
+                                            && let Some(&rt) = request_classes.get(&class)
+                                        {
+                                            let deobf_name = cur_func_va.and_then(|v| {
+                                                va_deobf_map.get(&(v as usize)).cloned()
+                                            });
+                                            let entry = candidates.entry(rt).or_insert_with(|| {
+                                                (HashSet::new(), HashSet::new(), Vec::new())
+                                            });
+                                            entry.0.insert(cmd_id);
+                                            entry.1.insert(deobf_name);
+                                            if let Some(prva) = push_rva {
+                                                entry.2.push(format!("0x{prva:X}"));
                                             }
+                                            break;
                                         }
                                     }
                                 }
@@ -506,6 +610,7 @@ fn disasm_all_req(
         }
     }
 
+    let candidate_count = candidates.len();
     for (rt, (ids, names, rvas)) in candidates {
         if ids.len() == 1 {
             out.insert(
@@ -518,6 +623,11 @@ fn disasm_all_req(
             req_rvas.insert(rt, rvas);
         }
     }
+    log::info!(
+        "Request scan complete: {} unique packet IDs from {candidate_count} candidate types in {:.2}s",
+        out.len(),
+        started.elapsed().as_secs_f64()
+    );
     req_rvas
 }
 
