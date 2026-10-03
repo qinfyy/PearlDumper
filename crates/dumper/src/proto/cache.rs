@@ -100,10 +100,10 @@ impl TypeCache {
                 ),
                 (
                     RuntimeType::from_class(
-                        get_cached_class("Google.Protobuf.ByteString").unwrap(),
+                        get_cached_class("Google.Protobuf.WellKnownTypes.Any").unwrap(),
                     )
                     .unwrap(),
-                    ByteString,
+                    Any,
                 ),
             ]),
         }

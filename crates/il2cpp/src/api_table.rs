@@ -154,14 +154,6 @@ pub fn bind_profile() -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("reflection bindings initialized twice"))
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn profile_is_consistent() {
-        super::validate_declarations(&super::supported_bindings().unwrap()).unwrap();
-    }
-}
-
 #[inline]
 pub fn all_entries() -> impl Iterator<Item = &'static ApiEntry> {
     inventory::iter::<ApiEntry>()

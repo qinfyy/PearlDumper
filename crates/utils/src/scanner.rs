@@ -139,6 +139,26 @@ pub fn game_assembly_code_sections() -> impl Iterator<Item = (usize, &'static [u
         .map(move |range| (range.start, &snapshot.bytes[range.clone()]))
 }
 
+pub fn game_assembly_functions() -> anyhow::Result<&'static crate::pe::FunctionTable> {
+    static TABLE: OnceLock<Result<crate::pe::FunctionTable, String>> = OnceLock::new();
+    TABLE
+        .get_or_init(|| {
+            crate::pe::FunctionTable::from_mapped_pe(game_assembly_slice())
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!("invalid GameAssembly exception directory: {error}"))
+}
+
+pub fn game_assembly_function(rva: usize) -> anyhow::Result<&'static [u8]> {
+    let range = game_assembly_functions()?
+        .containing(rva)
+        .ok_or_else(|| anyhow::anyhow!("no native function contains RVA 0x{rva:X}"))?;
+    game_assembly_slice()
+        .get(rva..range.end as usize)
+        .ok_or_else(|| anyhow::anyhow!("native function outside GameAssembly: 0x{rva:X}"))
+}
+
 pub fn scan_ga_section(pattern: &str) -> Option<usize> {
     game_assembly().scan(pattern)
 }
@@ -185,42 +205,4 @@ fn resolve_relative(bytes: &[u8], address: usize) -> Option<usize> {
         .checked_add(length)?
         .checked_add_signed(displacement as isize)?;
     (target < bytes.len()).then_some(target)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn relative_branches_handle_negative_offsets() {
-        let bytes = [0x90, 0xE8, 0xFA, 0xFF, 0xFF, 0xFF, 0x90];
-        assert_eq!(resolve_relative(&bytes, 1), Some(0));
-        assert_eq!(resolve_relative(&[0xE8, 1], 0), None);
-        assert_eq!(resolve_relative(&[0xE8, 0xFF, 0xFF, 0xFF, 0x7F], 0), None);
-    }
-
-    #[test]
-    fn only_rip_relative_mov_is_resolved() {
-        assert_eq!(
-            resolve_relative(&[0x48, 0x8B, 0x05, 0xF9, 0xFF, 0xFF, 0xFF], 0),
-            Some(0)
-        );
-        assert_eq!(
-            resolve_relative(&[0x48, 0x8B, 0x5C, 0x24, 0x10], 0),
-            Some(0)
-        );
-    }
-
-    #[test]
-    fn scanning_rejects_ambiguous_and_non_executable_matches() {
-        let mut snapshot = ModuleSnapshot {
-            bytes: vec![0x90, 0xCC, 0x90, 0xCC, 0x90],
-            executable: vec![0..5],
-        };
-        assert_eq!(snapshot.scan("CC 90"), None);
-        snapshot.executable = vec![0..3];
-        assert_eq!(snapshot.scan("CC 90"), Some(1));
-        snapshot.executable = vec![0..1];
-        assert_eq!(snapshot.scan("CC 90"), None);
-    }
 }

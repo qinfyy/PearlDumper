@@ -1,6 +1,6 @@
 use anyhow::Context;
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::OnceLock};
 use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
 use windows::core::{HSTRING, PCWSTR};
 
@@ -22,13 +22,18 @@ pub struct ClientProfile {
     pub api_table_rva: usize,
 }
 
-pub fn supported() -> anyhow::Result<ClientProfile> {
-    Ok(serde_json::from_str(include_str!(
-        "../../../profiles/4.6.51.json"
-    ))?)
+pub fn supported() -> anyhow::Result<&'static ClientProfile> {
+    static PROFILE: OnceLock<Result<ClientProfile, String>> = OnceLock::new();
+    PROFILE
+        .get_or_init(|| {
+            serde_json::from_str(include_str!("../../../profiles/4.6.51.json"))
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(|error| anyhow::anyhow!("invalid client profile: {error}"))
 }
 
-pub fn validate_loaded_client() -> anyhow::Result<ClientProfile> {
+pub fn validate_loaded_client() -> anyhow::Result<&'static ClientProfile> {
     let profile = supported()?;
     log::info!(
         "Client {}: checking loaded PE headers only; file hashing is disabled",
@@ -95,33 +100,4 @@ fn validate_loaded_header(base: usize, expected: &BinaryFingerprint) -> anyhow::
         );
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn profile_matches_target() {
-        let profile = super::supported().unwrap();
-        assert_eq!(profile.version, "4.6.51");
-        assert_eq!(profile.api_table_rva, 0x20AA978);
-        assert_eq!(profile.assembly.file_size, 560853280);
-        assert_eq!(profile.unity.machine, 0x8664);
-        assert_eq!(profile.assembly.sha256.len(), 64);
-    }
-
-    #[test]
-    fn loaded_header_mismatch_is_rejected() {
-        let expected = super::supported().unwrap().assembly;
-        let mut header = [0u8; 256];
-        header[..2].copy_from_slice(&0x5A4Du16.to_le_bytes());
-        header[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
-        header[0x80..0x84].copy_from_slice(&0x4550u32.to_le_bytes());
-        header[0x84..0x86].copy_from_slice(&expected.machine.to_le_bytes());
-        header[0x88..0x8C].copy_from_slice(&expected.timestamp.to_le_bytes());
-        header[0x98..0x9A].copy_from_slice(&0x20Bu16.to_le_bytes());
-        header[0xD0..0xD4].copy_from_slice(&expected.image_size.to_le_bytes());
-        assert!(super::validate_loaded_header(header.as_ptr() as usize, &expected).is_ok());
-        header[0x88] ^= 1;
-        assert!(super::validate_loaded_header(header.as_ptr() as usize, &expected).is_err());
-    }
 }

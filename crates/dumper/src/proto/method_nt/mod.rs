@@ -1,5 +1,6 @@
 use crate::proto::get_cached_class;
 use crate::proto::util;
+use anyhow::Context;
 use il2cpp::vm::{metadata_cache, value::Il2CppValue};
 use reflection::method_info::MethodInfo;
 use reflection::runtime_type::RuntimeType;
@@ -12,14 +13,20 @@ pub mod method;
 mod param_nt;
 mod param_table;
 
-pub fn get_method_nt_map() -> (HashMap<String, Vec<String>>, HashMap<String, String>) {
-    let (method_map, mut proto_name_map) = param_nt::process_table(param_table::PARAM_NT_MAP);
+pub fn get_method_nt_map() -> anyhow::Result<(HashMap<String, Vec<String>>, HashMap<String, String>)>
+{
+    log::info!("[Method NT] Recovering names from the parameter table");
+    let (method_map, mut proto_name_map) =
+        crate::guarded(|| Ok(param_nt::process_table(param_table::PARAM_NT_MAP)))
+            .context("method name recovery: parameter table")?;
 
-    let method_entries = method::get_method_nt_entries();
+    let method_entries = method::get_method_nt_entries()?;
     let method_count = method_entries.len();
     proto_name_map.extend(method_entries);
 
-    let enum_map = get_enum_names();
+    log::info!("[Method NT] Recovering enum names");
+    let enum_map =
+        crate::guarded(|| Ok(get_enum_names())).context("method name recovery: enum names")?;
     let enum_count = enum_map.len();
     proto_name_map.extend(enum_map);
 
@@ -48,7 +55,7 @@ pub fn get_method_nt_map() -> (HashMap<String, Vec<String>>, HashMap<String, Str
 
     if !output_lines.is_empty() {
         std::fs::write("./DUMP/method_nt.txt", output_lines.join("\n"))
-            .expect("Failed to write method_nt.txt");
+            .context("writing method_nt.txt")?;
     }
 
     log::debug!(
@@ -61,7 +68,7 @@ pub fn get_method_nt_map() -> (HashMap<String, Vec<String>>, HashMap<String, Str
 
     let _ = CACHED_NT_MAP.set(proto_name_map.clone());
 
-    (method_map, proto_name_map)
+    Ok((method_map, proto_name_map))
 }
 
 pub fn dump_global_field_map() -> HashMap<String, String> {
@@ -125,7 +132,13 @@ pub fn dump_global_field_map() -> HashMap<String, String> {
 pub fn get_enum_names() -> HashMap<String, String> {
     let mut output = HashMap::new();
 
-    let class = get_cached_class("XLua.ObjectTranslator.IniterAdderUnityEngineVector2").unwrap();
+    let Some(class) = get_cached_class("XLua.ObjectTranslator.IniterAdderUnityEngineVector2")
+    else {
+        // This optional name source was removed in 4.6.51; enum values still come
+        // from their own metadata and do not depend on the old XLua helper.
+        log::info!("Legacy XLua enum-name helper is absent; retaining metadata enum names");
+        return output;
+    };
     for method in class.get_methods() {
         let m_name = method.get_name();
 

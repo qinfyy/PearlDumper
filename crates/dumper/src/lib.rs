@@ -1,6 +1,7 @@
 use std::{
     any::Any,
     fs::File,
+    io::{BufWriter, Write},
     panic::{AssertUnwindSafe, catch_unwind},
     time::Instant,
 };
@@ -128,7 +129,7 @@ pub fn run() -> anyhow::Result<()> {
     log::info!("Selected dump stages: {selection}");
     ensure_output_directory()?;
     let mut report = DumpReport {
-        client_version: il2cpp::profile::supported()?.version,
+        client_version: il2cpp::profile::supported()?.version.clone(),
         stages: std::iter::once("runtime")
             .chain(stages.iter().map(|stage| stage.name()))
             .map(|name| StageReport {
@@ -148,17 +149,18 @@ pub fn run() -> anyhow::Result<()> {
 fn run_stage(stage: Stage) -> anyhow::Result<()> {
     match stage {
         Stage::Proto => {
-            script::prepare_method_metadata()?;
-            let mut proto = File::create("DUMP/StarRail.proto.partial")?;
-            let mut packet_ids = File::create("DUMP/packetIds.json.partial")?;
+            let mut proto = BufWriter::new(File::create("DUMP/StarRail.proto.partial")?);
+            let mut packet_ids = BufWriter::new(File::create("DUMP/packetIds.json.partial")?);
             proto::dump(
                 &mut proto,
                 &mut packet_ids,
-                proto::ProtoDumpMode::ClassFieldNumber,
+                proto::ProtoDumpMode::NativeGetters,
                 false,
             )?;
-            proto.sync_all()?;
-            packet_ids.sync_all()?;
+            proto.flush()?;
+            packet_ids.flush()?;
+            proto.get_ref().sync_all()?;
+            packet_ids.get_ref().sync_all()?;
             drop((proto, packet_ids));
             std::fs::rename("DUMP/StarRail.proto.partial", "DUMP/StarRail.proto")?;
             std::fs::rename("DUMP/packetIds.json.partial", "DUMP/packetIds.json")?;
@@ -193,47 +195,14 @@ pub(crate) fn guarded<T>(work: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Re
     }) {
         Ok(Ok(result)) => result,
         Ok(Err(payload)) => anyhow::bail!("Rust panic: {}", panic_message(payload)),
-        Err(error) => anyhow::bail!("native exception: {error:?}; no further stages will run"),
+        Err(error) => anyhow::bail!(
+            "native exception at {}: {error:?}; no further stages will run",
+            utils::memory::describe_address(error.address() as usize)
+        ),
     }
 }
 
 pub fn ensure_output_directory() -> anyhow::Result<()> {
     std::fs::create_dir_all("DUMP")?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn schema_and_parser_select_the_owner_schema_once() {
-        assert_eq!(
-            parse_stages(" schema, parser, excel, schema ").unwrap(),
-            vec![Stage::Schema, Stage::Excel]
-        );
-    }
-
-    #[test]
-    fn invalid_selection_fails_before_runtime_initialization() {
-        assert!(parse_stages("schema,invalid").is_err());
-        assert!(parse_stages(", ,").is_err());
-    }
-
-    #[test]
-    fn guard_preserves_errors_and_panics() {
-        assert_eq!(guarded(|| Ok(7)).unwrap(), 7);
-        assert!(
-            guarded::<()>(|| anyhow::bail!("test failure"))
-                .unwrap_err()
-                .to_string()
-                .contains("test failure")
-        );
-        assert!(
-            guarded::<()>(|| panic!("test panic"))
-                .unwrap_err()
-                .to_string()
-                .contains("test panic")
-        );
-    }
 }

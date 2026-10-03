@@ -8,12 +8,7 @@ use il2cpp::{
 };
 use reflection::{method_info::MethodInfo, runtime_type::RuntimeType};
 use serde::{Serialize, Serializer, ser::SerializeStruct as _};
-use std::{
-    borrow::Cow,
-    collections::HashMap,
-    sync::OnceLock,
-    time::{Duration, Instant},
-};
+use std::{borrow::Cow, collections::HashMap, sync::OnceLock};
 use utils::{game_assembly_slice, scan_ga_section};
 
 #[derive(Serialize)]
@@ -96,62 +91,6 @@ pub static METADATA_METHODS: OnceLock<HashMap<i32, HashMap<i32, Vec<MethodInfo>>
 pub static TYPE_INFOS: OnceLock<HashMap<Il2CppClass, usize>> = OnceLock::new(); // <Il2CppClass, rva>
 pub static METHODS: OnceLock<HashMap<u64, Il2CppMethod>> = OnceLock::new(); // <rva, Il2CppMethod>
 pub static STRING_LITERALS: OnceLock<HashMap<usize, Il2CppString>> = OnceLock::new(); // <rva, Il2CppString>
-
-pub fn prepare_method_metadata() -> anyhow::Result<()> {
-    if METADATA_METHODS.get().is_some() {
-        return Ok(());
-    }
-    let classes = il2cpp::CLASS_TABLE_VEC
-        .get()
-        .ok_or_else(|| anyhow::anyhow!("IL2CPP is not ready"))?;
-    log::info!(
-        "Preparing protocol method metadata for {} classes",
-        classes.len()
-    );
-    let started = Instant::now();
-    let mut last_progress = started;
-    let mut method_count = 0usize;
-    let mut metadata: HashMap<i32, HashMap<i32, Vec<MethodInfo>>> = HashMap::new();
-    for (index, class) in classes.iter().enumerate() {
-        if last_progress.elapsed() >= Duration::from_secs(2) {
-            log::info!(
-                "Protocol method metadata: {index}/{} classes, {method_count} methods, {:.1}s elapsed",
-                classes.len(),
-                started.elapsed().as_secs_f64()
-            );
-            last_progress = Instant::now();
-        }
-        let runtime_type = RuntimeType::from_class(*class)?;
-        let class_token = runtime_type.get_metadata_token();
-        for method in class.get_methods() {
-            let info = MethodInfo::from_handle(method)?;
-            metadata
-                .entry(class_token)
-                .or_default()
-                .entry(info.get_metadata_token())
-                .or_default()
-                .push(info);
-            method_count += 1;
-            if method_count % 256 == 0 && last_progress.elapsed() >= Duration::from_secs(2) {
-                log::info!(
-                    "Protocol method metadata: {index}/{} classes, {method_count} methods, {:.1}s elapsed",
-                    classes.len(),
-                    started.elapsed().as_secs_f64()
-                );
-                last_progress = Instant::now();
-            }
-        }
-    }
-    METADATA_METHODS
-        .set(metadata)
-        .map_err(|_| anyhow::anyhow!("method metadata was already initialized"))?;
-    log::info!(
-        "Protocol method metadata ready: {} classes, {method_count} methods in {:.2}s",
-        classes.len(),
-        started.elapsed().as_secs_f64()
-    );
-    Ok(())
-}
 
 #[allow(unused)]
 pub fn dump() -> anyhow::Result<()> {

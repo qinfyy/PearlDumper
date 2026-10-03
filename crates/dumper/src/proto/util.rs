@@ -1,9 +1,13 @@
-use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic};
+use iced_x86::{
+    Decoder, DecoderOptions, InstructionInfoFactory, Mnemonic, OpAccess, OpKind, Register,
+};
 use il2cpp::vm::{object::Il2CppObject, value::Il2CppValue};
 use indexmap::IndexMap;
 use reflection::{field_info::FieldInfo, runtime_type::RuntimeType};
-use std::{borrow::Cow, collections::HashMap};
-use utils::game_assembly_slice;
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+};
 
 use super::{FieldMinimalInfo, MessageMinimalInfo, NumberType, cache::TypeCache};
 
@@ -48,29 +52,64 @@ pub fn pack_wire_tag(field_id: u32, wire_type: u8) -> u32 {
 }
 
 pub fn is_correct_getter(field_offset: usize, getter_rva: usize) -> bool {
-    let slice = game_assembly_slice();
-    let mut decoder = Decoder::new(64, &slice[getter_rva..], DecoderOptions::NONE);
-
-    let mut instruction = Instruction::default();
-    let mut output = String::new();
-
-    while decoder.can_decode() {
-        decoder.decode_out(&mut instruction);
-        output.clear();
-
-        match instruction.mnemonic() {
-            Mnemonic::Ret => break,
-            Mnemonic::Mov | Mnemonic::Movzx | Mnemonic::Movss | Mnemonic::Movsd => {
-                let displacement_64 = instruction.memory_displacement64();
-                let displacement = if displacement_64 == 0 {
-                    instruction.memory_displacement32() as usize
-                } else {
-                    displacement_64 as usize
-                };
-
-                return displacement == field_offset;
+    let Ok((bytes, _)) = super::fields::code(getter_rva) else {
+        return false;
+    };
+    let mut owners = HashSet::from([Register::RCX]);
+    let mut info = InstructionInfoFactory::new();
+    for instruction in Decoder::new(64, &bytes[..bytes.len().min(1024)], DecoderOptions::NONE) {
+        if instruction.is_invalid()
+            || matches!(instruction.mnemonic(), Mnemonic::Ret | Mnemonic::Int3)
+        {
+            break;
+        }
+        if matches!(
+            instruction.mnemonic(),
+            Mnemonic::Mov
+                | Mnemonic::Movzx
+                | Mnemonic::Movsx
+                | Mnemonic::Movsxd
+                | Mnemonic::Movss
+                | Mnemonic::Movsd
+        ) && instruction.op0_kind() == OpKind::Register
+            && instruction.op1_kind() == OpKind::Memory
+            && owners.contains(&instruction.memory_base().full_register())
+            && instruction.memory_index() == Register::None
+            && instruction.memory_displacement64() as usize == field_offset
+        {
+            return true;
+        }
+        // A prologue MOV or a global load is not an instance field access.
+        let copy = instruction.mnemonic() == Mnemonic::Mov
+            && instruction.op0_kind() == OpKind::Register
+            && instruction.op1_kind() == OpKind::Register
+            && owners.contains(&instruction.op1_register().full_register());
+        for used in info.info(&instruction).used_registers() {
+            if matches!(
+                used.access(),
+                OpAccess::Write
+                    | OpAccess::CondWrite
+                    | OpAccess::ReadWrite
+                    | OpAccess::ReadCondWrite
+            ) {
+                owners.remove(&used.register().full_register());
             }
-            _ => {}
+        }
+        if copy {
+            owners.insert(instruction.op0_register().full_register());
+        }
+        if instruction.mnemonic() == Mnemonic::Call {
+            for reg in [
+                Register::RAX,
+                Register::RCX,
+                Register::RDX,
+                Register::R8,
+                Register::R9,
+                Register::R10,
+                Register::R11,
+            ] {
+                owners.remove(&reg);
+            }
         }
     }
 
@@ -82,7 +121,7 @@ pub fn map_field_names_from_property(ty: RuntimeType) -> IndexMap<usize, Cow<'st
         .get_properties(60)
         .into_iter()
         .filter_map(|p| {
-            let get_method = p.get_get_method(true).unwrap();
+            let get_method = p.get_get_method(true).ok()?;
             if !get_method.is_null() {
                 Some((p, get_method))
             } else {
@@ -91,19 +130,21 @@ pub fn map_field_names_from_property(ty: RuntimeType) -> IndexMap<usize, Cow<'st
         })
         .collect::<Vec<_>>();
 
-    ty.get_fields(62)
+    ty.get_fields_il2cpp()
         .into_iter()
+        .filter(|field| field.is_instance())
         .filter_map(|f| {
             getter_methods
                 .iter()
                 .find(|(_, m)| {
-                    is_correct_getter(f.get_il2cpp_field().offset(), m.get_il2cpp_method().rva())
+                    m.get_il2cpp_method()
+                        .checked_rva()
+                        .is_ok_and(|rva| is_correct_getter(f.get_offset(), rva))
                 })
-                .map(|(p, _)| {
-                    (
-                        f.get_il2cpp_field().offset(),
-                        p.get_name().unwrap().as_str(),
-                    )
+                .and_then(|(p, _)| {
+                    p.get_name()
+                        .ok()
+                        .map(|name| (f.get_offset(), name.as_str()))
                 })
         })
         .collect()

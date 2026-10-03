@@ -218,6 +218,7 @@ fn generate_method(
         let resolve_virtual = has_self.then(|| {
             quote! {
                 let method = ::il2cpp::api::il2cpp_object_get_virtual_method(instance, method);
+                ::anyhow::ensure!(method.0 != 0, "null virtual method for {}", #signature);
             }
         });
         quote! {
@@ -236,6 +237,11 @@ fn generate_method(
         }
     };
 
+    let receiver_check = has_self.then(|| {
+        quote! {
+            ::anyhow::ensure!(self.0 != 0, "cannot invoke {} on a null {}", #signature, #owner_lit);
+        }
+    });
     let self_param = if has_self { quote!(&self,) } else { quote!() };
 
     let func = quote! {
@@ -244,6 +250,7 @@ fn generate_method(
         #[allow(clippy::wrong_self_convention)]
         #[inline]
         #vis fn #fn_name(#self_param #(#arg_names: #arg_types),*) -> ::anyhow::Result<#ret_ty> {
+            #receiver_check
             #body
         }
     };

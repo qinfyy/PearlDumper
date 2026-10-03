@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use std::time::Instant;
+
+use anyhow::Context;
 
 use crate::proto::output::TypeToItemMap;
 
@@ -9,26 +12,46 @@ static CACHED_HANDLER_MAP: OnceLock<HashMap<String, String>> = OnceLock::new();
 pub static CS_HANDLER_TABLE: OnceLock<Vec<(String, String, usize)>> = OnceLock::new();
 // pub static SC_HANDLER_TABLE: OnceLock<Vec<(String, String, usize)>> = OnceLock::new();
 
-pub fn get_handler_nt_map(type_to_item: &TypeToItemMap) -> HashMap<String, String> {
+pub fn get_handler_nt_map(type_to_item: &TypeToItemMap) -> anyhow::Result<HashMap<String, String>> {
     if let Some(cached) = CACHED_HANDLER_MAP.get() {
-        return cached.clone();
+        return Ok(cached.clone());
     }
 
     let mut map = HashMap::new();
-    map.extend(handler::avatar_path_equipment::process(type_to_item));
-    map.extend(handler::equipment::process(type_to_item));
-    map.extend(handler::relic::process(type_to_item));
-    map.extend(handler::quest::process(type_to_item));
-    map.extend(handler::challengepeak_notify::process(type_to_item));
-    map.extend(handler::scene_battle_info::process(type_to_item));
-    map.extend(handler::scene_info::process_player(type_to_item));
-    map.extend(handler::scene_info::process_light(type_to_item));
-    map.extend(handler::lineup_info::process(type_to_item));
-    map.extend(handler::friend_login_info::process(type_to_item));
-    map.extend(handler::cs_player_get_token::process(type_to_item));
-    map.extend(handler::player_sync_sc_notify::process(type_to_item));
-    map.extend(handler::gate_server::process_all(type_to_item));
+    let steps: &[(&str, fn(&TypeToItemMap) -> HashMap<String, String>)] = &[
+        (
+            "avatar path equipment",
+            handler::avatar_path_equipment::process,
+        ),
+        ("equipment", handler::equipment::process),
+        ("relic", handler::relic::process),
+        ("quest", handler::quest::process),
+        (
+            "challenge peak notify",
+            handler::challengepeak_notify::process,
+        ),
+        ("scene battle info", handler::scene_battle_info::process),
+        ("scene player info", handler::scene_info::process_player),
+        ("scene light info", handler::scene_info::process_light),
+        ("lineup info", handler::lineup_info::process),
+        ("friend login info", handler::friend_login_info::process),
+        ("player get token", handler::cs_player_get_token::process),
+        ("player sync", handler::player_sync_sc_notify::process),
+        ("gate server", handler::gate_server::process_all),
+    ];
+    for &(name, recover) in steps {
+        let started = Instant::now();
+        log::info!("[Handler NT] Starting {name}");
+        let entries = crate::guarded(|| Ok(recover(type_to_item)))
+            .with_context(|| format!("packet handler field names: {name}"))?;
+        log::info!(
+            "[Handler NT] Finished {name}: {} names in {:.2}s",
+            entries.len(),
+            started.elapsed().as_secs_f64()
+        );
+        map.extend(entries);
+    }
     let _ = CACHED_HANDLER_MAP.set(map.clone());
 
-    map
+    Ok(map)
 }

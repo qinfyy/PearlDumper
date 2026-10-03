@@ -72,7 +72,7 @@ impl<T: Copy> IntoIterator for &List<T> {
 }
 
 impl<T: Copy> List<T> {
-    /// Returns the number of elements
+    // Returns the number of elements
     pub fn len(&self) -> usize {
         if self.size >= 0 {
             self.size as usize
@@ -81,12 +81,12 @@ impl<T: Copy> List<T> {
         }
     }
 
-    /// Returns true if the list is empty
+    // Returns true if the list is empty
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Safely get element at index, returns None if out of bounds
+    // Safely get element at index, returns None if out of bounds
     pub fn get(&self, index: usize) -> Option<T> {
         if let Some(array) = self.get_array() {
             array.get(index)
@@ -95,7 +95,7 @@ impl<T: Copy> List<T> {
         }
     }
 
-    /// Returns an iterator over the elements
+    // Returns an iterator over the elements
     pub fn iter(&self) -> ListIter<T> {
         if let Some(array) = self.get_array() {
             unsafe {
@@ -115,18 +115,18 @@ impl<T: Copy> List<T> {
         }
     }
 
-    /// Returns the first element, if any
+    // Returns the first element, if any
     pub fn first(&self) -> Option<T> {
         self.get(0)
     }
 
-    /// Returns the last element, if any
+    // Returns the last element, if any
     pub fn last(&self) -> Option<T> {
         let len = self.len();
         if len > 0 { self.get(len - 1) } else { None }
     }
 
-    /// Find the first element where the callback returns true
+    // Find the first element where the callback returns true
     pub fn find<F>(&self, predicate: F) -> Option<T>
     where
         F: Fn(&T) -> bool,
@@ -134,7 +134,7 @@ impl<T: Copy> List<T> {
         self.iter().find(predicate)
     }
 
-    /// Returns true if the list contains the element
+    // Returns true if the list contains the element
     pub fn contains(&self, value: &T) -> bool
     where
         T: PartialEq,
@@ -142,7 +142,7 @@ impl<T: Copy> List<T> {
         self.iter().any(|x| x == *value)
     }
 
-    /// Performs a binary search, assuming the list is sorted
+    // Performs a binary search, assuming the list is sorted
     pub fn binary_search(&self, value: &T) -> Result<usize, usize>
     where
         T: Ord,
@@ -164,7 +164,7 @@ impl<T: Copy> List<T> {
         Err(low)
     }
 
-    /// Returns true if the list starts with the given slice
+    // Returns true if the list starts with the given slice
     pub fn starts_with(&self, slice: &[T]) -> bool
     where
         T: PartialEq,
@@ -175,7 +175,7 @@ impl<T: Copy> List<T> {
         self.iter().take(slice.len()).eq(slice.iter().copied())
     }
 
-    /// Returns true if the list ends with the given slice
+    // Returns true if the list ends with the given slice
     pub fn ends_with(&self, slice: &[T]) -> bool
     where
         T: PartialEq,
@@ -188,7 +188,7 @@ impl<T: Copy> List<T> {
             .eq(slice.iter().copied())
     }
 
-    /// Internal: Get the underlying Il2CppArray
+    // Internal: Get the underlying Il2CppArray
     fn get_array(&self) -> Option<&Array<T>> {
         if self.items.is_null() || self.size < 0 {
             None
@@ -264,17 +264,17 @@ impl<T: Copy> IntoIterator for &Array<T> {
 }
 
 impl<T: Copy> Array<T> {
-    /// Returns the number of elements
+    // Returns the number of elements
     pub fn len(&self) -> usize {
         self.max_length
     }
 
-    /// Returns true if the array is empty
+    // Returns true if the array is empty
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Safely get element at index, returns None if out of bounds
+    // Safely get element at index, returns None if out of bounds
     pub fn get(&self, index: usize) -> Option<T> {
         if index >= self.max_length {
             None
@@ -286,7 +286,7 @@ impl<T: Copy> Array<T> {
         }
     }
 
-    /// Returns an iterator over the elements
+    // Returns an iterator over the elements
     pub fn iter(&self) -> ArrayIter<T> {
         unsafe {
             let slice = slice::from_raw_parts(self.elements.as_ptr(), self.max_length);
@@ -298,18 +298,18 @@ impl<T: Copy> Array<T> {
         }
     }
 
-    /// Returns the first element, if any
+    // Returns the first element, if any
     pub fn first(&self) -> Option<T> {
         self.get(0)
     }
 
-    /// Returns the last element, if any
+    // Returns the last element, if any
     pub fn last(&self) -> Option<T> {
         let len = self.len();
         if len > 0 { self.get(len - 1) } else { None }
     }
 
-    /// Find the first element where the callback returns true
+    // Find the first element where the callback returns true
     pub fn find<F>(&self, predicate: F) -> Option<T>
     where
         F: Fn(&T) -> bool,
@@ -317,7 +317,7 @@ impl<T: Copy> Array<T> {
         self.iter().find(predicate)
     }
 
-    /// Returns true if the array contains the element
+    // Returns true if the array contains the element
     pub fn contains(&self, value: &T) -> bool
     where
         T: PartialEq,
@@ -325,7 +325,7 @@ impl<T: Copy> Array<T> {
         self.iter().any(|x| x == *value)
     }
 
-    /// Performs a binary search, assuming the array is sorted
+    // Performs a binary search, assuming the array is sorted
     pub fn binary_search(&self, value: &T) -> Result<usize, usize>
     where
         T: Ord,
@@ -347,7 +347,7 @@ impl<T: Copy> Array<T> {
         Err(low)
     }
 
-    /// Returns true if the array starts with the given slice
+    // Returns true if the array starts with the given slice
     pub fn starts_with(&self, slice: &[T]) -> bool
     where
         T: PartialEq,
@@ -358,7 +358,7 @@ impl<T: Copy> Array<T> {
         self.iter().take(slice.len()).eq(slice.iter().copied())
     }
 
-    /// Returns true if the array ends with the given slice
+    // Returns true if the array ends with the given slice
     pub fn ends_with(&self, slice: &[T]) -> bool
     where
         T: PartialEq,
@@ -484,7 +484,7 @@ impl<K: PartialEq + Copy, V: Copy> IntoIterator for &Dictionary<K, V> {
 }
 
 impl<K: PartialEq + Copy, V: Copy> Dictionary<K, V> {
-    /// Returns the number of entries
+    // Returns the number of entries
     pub fn len(&self) -> usize {
         if self.count >= 0 {
             self.count as usize
@@ -493,22 +493,22 @@ impl<K: PartialEq + Copy, V: Copy> Dictionary<K, V> {
         }
     }
 
-    /// Returns true if the dictionary is empty
+    // Returns true if the dictionary is empty
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Safely get value by key, returns None if key not found
+    // Safely get value by key, returns None if key not found
     pub fn get(&self, key: K) -> Option<V> {
         self.iter().find(|(k, _)| k == &key).map(|(_, v)| v)
     }
 
-    /// Returns true if the key exists
+    // Returns true if the key exists
     pub fn contains_key(&self, key: K) -> bool {
         self.iter().any(|(k, _)| k == key)
     }
 
-    /// Returns an iterator over key-value pairs
+    // Returns an iterator over key-value pairs
     pub fn iter(&self) -> DictIter<K, V> {
         if !self.entries.is_null() && self.count > 0 {
             unsafe {
@@ -528,7 +528,7 @@ impl<K: PartialEq + Copy, V: Copy> Dictionary<K, V> {
         }
     }
 
-    /// Returns an iterator over keys
+    // Returns an iterator over keys
     pub fn keys(&self) -> DictKeysIter<K, V> {
         if !self.entries.is_null() && self.count > 0 {
             unsafe {
@@ -548,7 +548,7 @@ impl<K: PartialEq + Copy, V: Copy> Dictionary<K, V> {
         }
     }
 
-    /// Returns an iterator over values
+    // Returns an iterator over values
     pub fn values(&self) -> DictValuesIter<K, V> {
         if !self.entries.is_null() && self.count > 0 {
             unsafe {
@@ -568,12 +568,12 @@ impl<K: PartialEq + Copy, V: Copy> Dictionary<K, V> {
         }
     }
 
-    /// Returns the key-value pair for the given key, if found
+    // Returns the key-value pair for the given key, if found
     pub fn get_key_value(&self, key: K) -> Option<(K, V)> {
         self.iter().find(|(k, _)| k == &key)
     }
 
-    /// Find the first value where the callback returns true
+    // Find the first value where the callback returns true
     pub fn find<F>(&self, predicate: F) -> Option<V>
     where
         F: Fn(&K, &V) -> bool,

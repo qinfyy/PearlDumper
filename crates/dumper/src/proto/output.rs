@@ -1,11 +1,18 @@
 use super::{MessageMinimalInfo, cache::TypeCache};
 
-use crate::proto::{NumberType, RETCODE_FIELD_NAME, cache::CachedType, nt};
+use crate::proto::{NumberType, RETCODE_FIELD_NAME, cache::CachedType};
+use anyhow::{Context, ensure};
 use convert_case::{Case, Casing as _};
 use il2cpp::vm::{metadata_cache, object::Il2CppObject, string::Il2CppString, value::Il2CppValue};
 use indexmap::IndexMap;
 use reflection::runtime_type::RuntimeType;
-use std::{borrow::Cow, cell::RefCell, collections::HashMap, io::Write, rc::Rc};
+use std::{
+    borrow::Cow,
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    io::Write,
+    rc::Rc,
+};
 
 pub type TypeToItemMap = IndexMap<RuntimeType, Rc<RefCell<ProtoItem>>>;
 
@@ -96,20 +103,11 @@ impl Message {
         result.push('\n');
 
         for nested in &self.children {
-            if let ProtoItem::Enum(en) = &*nested.borrow()
-                && self
-                    .oneofs
-                    .iter()
-                    .any(|v| v.fields.len() == en.variants.len() - 1)
-            {
-                continue; // Skip enum for oneof
-            }
-
             result.push_str(&nested.borrow().fmt_protobuf_with_depth(nested_depth + 1));
         }
 
         for field in &self.fields {
-            let field_display_name = if field.name == *RETCODE_FIELD_NAME {
+            let field_display_name = if field.name == RETCODE_FIELD_NAME {
                 "retcode".to_string()
             } else {
                 snake_field(&field.name)
@@ -118,7 +116,7 @@ impl Message {
             result.push_str(&format!(
                 "{}\t{} {} = {}; // offset: {}\n",
                 indent,
-                remove_namespace(&field.kind),
+                qualified_field_type(&field.kind),
                 field_display_name,
                 field.number,
                 field.offset
@@ -133,7 +131,7 @@ impl Message {
             ));
 
             for field in &oneof.fields {
-                let field_display_name = if field.name == *RETCODE_FIELD_NAME {
+                let field_display_name = if field.name == RETCODE_FIELD_NAME {
                     "retcode".to_string()
                 } else {
                     snake_field(&field.name)
@@ -143,7 +141,7 @@ impl Message {
                     result.push_str(&format!(
                         "{}\t\t{} {} = {}; // offset: {}\n",
                         indent,
-                        remove_namespace(&field.kind),
+                        qualified_field_type(&field.kind),
                         field_display_name,
                         field.number,
                         field.offset
@@ -152,7 +150,7 @@ impl Message {
                     result.push_str(&format!(
                         "{}\t\t{} {} = {};\n",
                         indent,
-                        remove_namespace(&field.kind),
+                        qualified_field_type(&field.kind),
                         field_display_name,
                         field.number
                     ));
@@ -188,6 +186,16 @@ impl Enum {
         ));
         result.push('\n');
 
+        if self
+            .variants
+            .iter()
+            .map(|(_, value)| value)
+            .collect::<HashSet<_>>()
+            .len()
+            != self.variants.len()
+        {
+            result.push_str(&format!("{indent}\toption allow_alias = true;\n"));
+        }
         for (name, discriminant) in &self.variants {
             result.push_str(&format!("{indent}\t{name} = {discriminant};"));
             result.push('\n');
@@ -222,234 +230,218 @@ pub fn snake_field(input: &str) -> String {
     }
 }
 
-pub fn remove_namespace(s: &str) -> String {
-    let parts: Vec<&str> = s.split('.').collect();
-
-    if parts.len() > 1 {
-        parts[1..].join(".")
-    } else {
-        s.to_string()
-    }
+fn qualified_field_type(kind: &str) -> String {
+    // Keep internal names compatible with the naming handlers. Only serialized
+    // references become absolute, so a nested type cannot shadow a root message.
+    rewrite_type_tokens(kind, |name| {
+        if matches!(
+            name,
+            "repeated"
+                | "map"
+                | "bool"
+                | "int32"
+                | "int64"
+                | "uint32"
+                | "uint64"
+                | "sint32"
+                | "sint64"
+                | "fixed32"
+                | "fixed64"
+                | "sfixed32"
+                | "sfixed64"
+                | "float"
+                | "double"
+                | "string"
+                | "bytes"
+        ) {
+            name.to_owned()
+        } else {
+            format!(".{}", name.trim_start_matches('.'))
+        }
+    })
 }
 
-pub fn remove_repeated_map(s: &str) -> String {
-    if s.starts_with("repeated ") {
-        s.strip_prefix("repeated ").unwrap()
-    } else if s.starts_with("map<") {
-        let comma_pos = s.find(',').unwrap();
-        let end_pos = s.rfind('>').unwrap();
-        s[comma_pos + 1..end_pos].trim()
-    } else {
-        s
-    }
-    .to_string()
+fn rewrite_type_tokens(kind: &str, mut rename: impl FnMut(&str) -> String) -> String {
+    kind.split_inclusive(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.'))
+        .map(|part| {
+            let end = part
+                .trim_end_matches(|ch: char| {
+                    !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.')
+                })
+                .len();
+            if end == 0 {
+                part.to_owned()
+            } else {
+                format!("{}{}", rename(&part[..end]), &part[end..])
+            }
+        })
+        .collect()
 }
 
 fn process_cmd_id(
-    map: &mut IndexMap<RuntimeType, Rc<RefCell<ProtoItem>>>,
+    map: &mut TypeToItemMap,
     rsp_notify_map: &HashMap<String, u16>,
     req_map: &HashMap<String, (u16, Option<String>)>,
+    rsp_notify_names: &HashMap<String, String>,
     method_nt_map: &HashMap<String, String>,
 ) -> (HashMap<i32, String>, HashMap<String, String>) {
-    let array = map.values_mut().collect::<Vec<_>>();
-
-    let mut message_usages: HashMap<String, u32> = HashMap::with_capacity(array.len());
-    let mut cmd_ids: HashMap<i32, String> = HashMap::new();
-    let mut nt_map: HashMap<String, String> = nt::get_rsp_notify_names();
-    for (obf_name, deobf_name) in method_nt_map {
-        nt_map.insert(obf_name.clone(), deobf_name.clone());
+    let mut proposed: HashMap<String, HashSet<String>> = HashMap::new();
+    for (obfuscated, name) in rsp_notify_names.iter().chain(method_nt_map) {
+        proposed
+            .entry(obfuscated.clone())
+            .or_default()
+            .insert(name.clone());
+    }
+    for (obfuscated, (_, name)) in req_map {
+        if let Some(name) = name {
+            proposed
+                .entry(obfuscated.clone())
+                .or_default()
+                .insert(name.clone());
+        }
+    }
+    let mut names = HashMap::new();
+    for (obfuscated, candidates) in proposed {
+        if candidates.len() == 1 {
+            names.insert(obfuscated, candidates.into_iter().next().unwrap());
+        } else {
+            log::warn!("Conflicting protocol names for {obfuscated}: {candidates:?}");
+        }
     }
 
-    for proto_message in &array {
-        match &mut *proto_message.borrow_mut() {
+    let originals: Vec<String> = map
+        .values()
+        .map(|item| {
+            match &*item.borrow() {
+                ProtoItem::Message(message) => &message.name,
+                ProtoItem::Enum(en) => &en.name,
+            }
+            .clone()
+        })
+        .collect();
+    let mut short_counts = HashMap::<&str, usize>::new();
+    for original in &originals {
+        *short_counts.entry(short_name(original)).or_default() += 1;
+    }
+    // A short name is usable only when it identifies one type. Nested messages
+    // retain their parent path even when the binding supplies a short name.
+    let mut local_names: HashMap<String, String> = originals
+        .iter()
+        .filter_map(|original| {
+            names
+                .get(original)
+                .or_else(|| {
+                    (short_counts[short_name(original)] == 1)
+                        .then(|| names.get(short_name(original)))
+                        .flatten()
+                })
+                .map(|name| (original.clone(), short_name(name).to_string()))
+        })
+        .collect();
+    loop {
+        let mut output_names: HashMap<String, Vec<&String>> = HashMap::new();
+        for original in &originals {
+            let name = local_names
+                .get(original)
+                .map(String::as_str)
+                .unwrap_or(short_name(original));
+            let scope = original
+                .rsplit_once('.')
+                .map(|(scope, _)| scope)
+                .unwrap_or("");
+            output_names
+                .entry(format!("{scope}.{name}"))
+                .or_default()
+                .push(original);
+        }
+        let mut removed = false;
+        for originals in output_names.values().filter(|names| names.len() > 1) {
+            for original in originals {
+                if local_names.remove(*original).is_some() {
+                    log::warn!("Protocol name collision for {original}; retaining original name");
+                    removed = true;
+                }
+            }
+        }
+        if !removed {
+            break;
+        }
+    }
+
+    let mut cmd_ids = HashMap::new();
+    let mut nt_map = HashMap::new();
+    for original in &originals {
+        let mut prefix = String::new();
+        let mut renamed = Vec::new();
+        for segment in original.split('.') {
+            if !prefix.is_empty() {
+                prefix.push('.');
+            }
+            prefix.push_str(segment);
+            renamed.push(
+                local_names
+                    .get(&prefix)
+                    .map(String::as_str)
+                    .unwrap_or(segment),
+            );
+        }
+        let renamed = renamed.join(".");
+        if renamed != *original {
+            nt_map.insert(original.clone(), renamed);
+        }
+    }
+    for item in map.values() {
+        let mut item = item.borrow_mut();
+        match &mut *item {
             ProtoItem::Message(message) => {
-                for field in &message.fields {
-                    for item in remove_repeated_map(&field.kind).split('.') {
-                        *message_usages.entry(remove_repeated_map(item)).or_default() += 1;
-                    }
+                message.deobfuscated_name = nt_map.get(&message.name).cloned();
+                if let Some((id, _)) = req_map.get(&message.name) {
+                    message.cmd_id = *id;
+                    message.msg_type = MessageType::Req;
+                } else if let Some(&id) = rsp_notify_map.get(&message.name) {
+                    message.cmd_id = id;
+                    message.msg_type = if message
+                        .deobfuscated_name
+                        .as_ref()
+                        .is_some_and(|name| name.ends_with("Rsp"))
+                        || message.fields.iter().any(|field| {
+                            field.name == RETCODE_FIELD_NAME
+                                || snake_field(&field.name) == "retcode"
+                        }) {
+                        MessageType::Rsp
+                    } else {
+                        MessageType::Notify
+                    };
                 }
-
-                for oneof in &message.oneofs {
-                    for field in &oneof.fields {
-                        for item in remove_repeated_map(&field.kind).split('.') {
-                            *message_usages.entry(remove_repeated_map(item)).or_default() += 1;
-                        }
-                    }
+                if message.cmd_id != 0 {
+                    cmd_ids.insert(i32::from(message.cmd_id), message.name.clone());
                 }
             }
-            ProtoItem::Enum(enumeration) => {
-                for (name, discriminant) in &enumeration.variants {
-                    if !name.starts_with("Cmd") {
-                        continue;
-                    }
-
-                    let name_pascal = name.strip_suffix("None").unwrap_or(name);
-                    if name.ends_with("None") {
-                        enumeration.name = name_pascal.to_string();
-                    }
-
-                    cmd_ids.insert(
-                        *discriminant,
-                        name_pascal
-                            .strip_prefix("Cmd")
-                            .unwrap_or(name_pascal)
-                            .to_string(),
-                    );
-                }
+            ProtoItem::Enum(en) => {
+                en.deobfuscated_name = nt_map.get(&en.name).cloned();
             }
         }
     }
 
-    for i in 0..array.len() {
-        let proto_message = &array[i];
-        let mut current_cmd_name: Option<String> = None;
-
-        if let ProtoItem::Message(message) = &mut *proto_message.borrow_mut() {
-            if let Some(deobf_name) = method_nt_map.get(short_name(&message.name)) {
-                message.deobfuscated_name = Some(deobf_name.to_string());
-            }
-
-            for field in &mut message.fields {
-                let name = remove_repeated_map(&field.kind);
-
-                if let Some(nt_name) = nt_map.get(&name).or_else(|| nt_map.get(short_name(&name))) {
-                    field.kind = field.kind.replace(&name, nt_name);
-                }
-
-                if let Some(nted) = method_nt_map
-                    .get(&name)
-                    .or_else(|| method_nt_map.get(short_name(&name)))
-                {
-                    field.kind = field.kind.replace(&name, nted);
-                }
-            }
-
-            for oneof in &mut message.oneofs {
-                for field in &mut oneof.fields {
-                    let name = remove_repeated_map(&field.kind);
-
-                    if let Some(nt_name) =
-                        nt_map.get(&name).or_else(|| nt_map.get(short_name(&name)))
-                    {
-                        field.kind = field.kind.replace(&name, nt_name);
-                    }
-                }
-            }
-
-            if let Some((cmd_id, deobf_name)) = req_map.get(&message.name) {
-                message.cmd_id = *cmd_id;
-                message.msg_type = MessageType::Req;
-                if let Some(deobf) = deobf_name {
-                    message.deobfuscated_name = Some(deobf.clone());
-                    nt_map.insert(message.name.clone(), deobf.clone());
-                }
-                cmd_ids.insert(message.cmd_id as i32, message.name.clone());
-                continue;
-            }
-
-            if let Some(cmd_id) = rsp_notify_map.get(&message.name) {
-                message.cmd_id = *cmd_id;
-                message.msg_type = if message.fields.iter().any(|field| {
-                    let name = snake_field(&field.name);
-                    name == *RETCODE_FIELD_NAME || name == "retcode"
-                }) {
-                    MessageType::Rsp
-                } else {
-                    MessageType::Notify
-                };
-                cmd_ids.insert(message.cmd_id as i32, message.name.clone());
-
-                if let Some(deobf) = nt_map
-                    .get(&message.name)
-                    .or_else(|| nt_map.get(short_name(&message.name)))
-                {
-                    message.deobfuscated_name = Some(deobf.to_string());
-                    if message.msg_type == MessageType::Rsp {
-                        current_cmd_name = Some(deobf.to_string());
-                    }
-                } else if message.msg_type == MessageType::Rsp {
-                    for j in (0..i).rev() {
-                        let previous_proto = &array[j];
-                        let ProtoItem::Message(prev_message) = &mut *previous_proto.borrow_mut()
-                        else {
-                            continue;
-                        };
-
-                        if prev_message.msg_type == MessageType::Req {
-                            if let Some(req_name) = prev_message.deobfuscated_name.as_ref() {
-                                let rsp_name = req_name
-                                    .as_str()
-                                    .strip_suffix("CsReq")
-                                    .map(|s| format!("{s}ScRsp"))
-                                    .or_else(|| {
-                                        req_name
-                                            .as_str()
-                                            .strip_suffix("Req")
-                                            .map(|s| format!("{s}Rsp"))
-                                    })
-                                    .unwrap_or_else(|| req_name.clone());
-
-                                nt_map.insert(message.name.to_string(), rsp_name.to_string());
-                                message.deobfuscated_name = Some(rsp_name);
-                            }
-                            break;
-                        }
-
-                        if prev_message.msg_type == MessageType::Rsp {
-                            break;
-                        }
-                    }
-                } else {
-                    continue;
-                }
-            }
-        } else if let ProtoItem::Enum(en) = &mut *proto_message.borrow_mut()
-            && let Some(deobf_name) = method_nt_map
-                .get(&en.name)
-                .or_else(|| method_nt_map.get(short_name(&en.name)))
-        {
-            en.deobfuscated_name = Some(deobf_name.to_string());
-            nt_map.insert(en.name.to_string(), deobf_name.to_string());
-        }
-
-        if let Some(cmd_name) = current_cmd_name {
-            for j in (0..i).rev() {
-                let previous_proto = &array[j];
-
-                let ProtoItem::Message(prev_message) = &mut *previous_proto.borrow_mut() else {
-                    continue;
-                };
-
-                if prev_message.msg_type != MessageType::Req {
-                    continue;
-                }
-
-                if let Some(deobf_name) = prev_message.deobfuscated_name.as_ref() {
-                    nt_map.insert(prev_message.name.clone(), deobf_name.clone());
-                    break;
-                }
-
-                if !message_usages.contains_key(&prev_message.name) {
-                    let req_name = cmd_name
-                        .as_str()
-                        .strip_suffix("ScRsp")
-                        .map(|s| format!("{s}CsReq"))
-                        .or_else(|| {
-                            cmd_name
-                                .as_str()
-                                .strip_suffix("Rsp")
-                                .map(|s| format!("{s}CsReq"))
-                        })
-                        .unwrap_or_else(|| cmd_name.clone());
-
-                    nt_map.insert(prev_message.name.to_string(), req_name.to_string());
-                    prev_message.deobfuscated_name = Some(req_name);
-                    break;
-                }
+    // Resolve all names before rewriting field types, including nested types and maps.
+    for item in map.values() {
+        if let ProtoItem::Message(message) = &mut *item.borrow_mut() {
+            for field in message.fields.iter_mut().chain(
+                message
+                    .oneofs
+                    .iter_mut()
+                    .flat_map(|oneof| &mut oneof.fields),
+            ) {
+                field.kind = rewrite_type_tokens(&field.kind, |name| {
+                    nt_map
+                        .get(name)
+                        .map(String::as_str)
+                        .unwrap_or(name)
+                        .to_owned()
+                });
             }
         }
     }
-
     (cmd_ids, nt_map)
 }
 
@@ -515,31 +507,40 @@ pub fn generate_protobuf<W: Write>(
     minimal_info_map: &HashMap<RuntimeType, MessageMinimalInfo>,
     rsp_notify_map: &HashMap<RuntimeType, u16>,
     req_map: &HashMap<RuntimeType, (u16, Option<String>)>,
+    rsp_notify_names: &HashMap<String, String>,
     method_nt_map: &HashMap<String, String>,
     predeobf_map: &HashMap<String, String>,
     mut out: W,
-) -> (HashMap<i32, String>, HashMap<String, String>, TypeToItemMap) {
+) -> anyhow::Result<(HashMap<i32, String>, HashMap<String, String>, TypeToItemMap)> {
     let mut type_to_item: TypeToItemMap = IndexMap::new();
+    let mut parents = Vec::new();
 
     for i in unsafe { il2cpp::RPG_NETWORK_PROTO_START..il2cpp::RPG_NETWORK_PROTO_END } {
         let class = metadata_cache::get_typeinfo_from_typedefindex(i);
-        let runtime_type = RuntimeType::from_class(class).unwrap();
-        let type_name = runtime_type.get_name().unwrap().as_str();
+        let runtime_type = RuntimeType::from_class(class)
+            .with_context(|| format!("resolving protocol output type {i}"))?;
+        let type_name = runtime_type.get_name()?.as_str();
         if type_name == "<Module>" {
             continue;
         }
 
-        // log::debug!("[Proto Dumper] generating proto {type_name}", );
-
-        let field_names = super::util::map_field_names_from_property(runtime_type);
-
-        let parent_type = runtime_type.get_declaring_type().unwrap();
+        let parent_type = runtime_type.get_declaring_type()?;
         let parent_type = (!parent_type.is_null()).then_some(parent_type);
 
         let is_nested = parent_type.is_some();
 
         let proto_item = if let Some(message_info) = minimal_info_map.get(&runtime_type) {
-            let mut fields = Vec::<(i32, Field)>::with_capacity(message_info.fields.len());
+            let mut fields = Vec::<Field>::with_capacity(message_info.fields.len());
+            let field_names = super::util::map_field_names_from_property(runtime_type);
+            let instance_fields = runtime_type.get_fields_il2cpp();
+            let mut numbers = HashSet::new();
+            for info in &message_info.fields {
+                let number = info.tag >> 3;
+                ensure!(
+                    number > 0 && numbers.insert(number),
+                    "invalid or duplicate field {number} in {type_name}"
+                );
+            }
 
             for field_info in message_info
                 .fields
@@ -547,45 +548,49 @@ pub fn generate_protobuf<W: Write>(
                 .filter(|f| f.oneof_extra_data.is_none())
             {
                 if let Some(property) = field_info.property {
-                    fields.push((
-                        property.get_metadata_token(),
-                        Field {
-                            kind: csharp_type_to_protobuf_type(
-                                type_cache,
-                                &property.get_property_type().unwrap(),
-                                field_info.number_type,
-                            )
-                            .to_string(),
-                            name: property.get_name().unwrap().as_str().to_string(),
-                            number: field_info.tag >> 3,
-                            offset: field_info.offset,
-                        },
-                    ));
+                    fields.push(Field {
+                        kind: csharp_type_to_protobuf_type(
+                            type_cache,
+                            &property.get_property_type()?,
+                            field_info.number_type,
+                        )
+                        .to_string(),
+                        name: property.get_name()?.as_str().to_string(),
+                        number: field_info.tag >> 3,
+                        offset: field_info.offset,
+                    });
                 } else {
-                    let f = runtime_type.get_fields(62);
-                    let field = f
+                    let field = instance_fields
                         .iter()
                         .find(|f| f.is_instance() && f.get_offset() as u32 == field_info.offset)
-                        .unwrap();
-
-                    fields.push((
-                        field.get_metadata_token(),
-                        Field {
-                            kind: csharp_type_to_protobuf_type(
-                                type_cache,
-                                &field.get_field_type().unwrap(),
-                                field_info.number_type,
+                        .with_context(|| {
+                            format!(
+                                "{type_name}: no instance field at 0x{:X}",
+                                field_info.offset
                             )
-                            .to_string(),
-                            name: field_names.get(&field.get_offset()).unwrap().to_string(),
-                            number: field_info.tag >> 3,
-                            offset: field_info.offset,
-                        },
-                    ));
+                        })?;
+
+                    // 4.6.51 strips most PropertyInfo rows. The native getter has
+                    // already identified storage; its field name remains usable.
+                    let name = field_names
+                        .get(&field.get_offset())
+                        .cloned()
+                        .unwrap_or(field.get_name()?.as_str());
+                    fields.push(Field {
+                        kind: csharp_type_to_protobuf_type(
+                            type_cache,
+                            &field.get_field_type()?,
+                            field_info.number_type,
+                        )
+                        .to_string(),
+                        name: name.to_string(),
+                        number: field_info.tag >> 3,
+                        offset: field_info.offset,
+                    });
                 }
             }
 
-            fields.sort_by_key(|(_, f)| f.number);
+            fields.sort_by_key(|f| f.number);
             let mut oneofs = Vec::<OneOf>::new();
 
             for field_info in message_info
@@ -599,7 +604,7 @@ pub fn generate_protobuf<W: Write>(
                         .as_ref()
                         .unwrap()
                         .property
-                        .unwrap();
+                        .context("missing oneof discriminator property")?;
 
                     let oneof = if let Some(oneof) = oneofs
                         .iter_mut()
@@ -626,40 +631,49 @@ pub fn generate_protobuf<W: Write>(
                         offset: field_info.offset,
                     });
                 } else {
-                    let fields = runtime_type.get_fields(62);
                     let oneof_variant = field_info.oneof_extra_data.as_ref().unwrap();
-                    let oneof_enum_field = fields
+                    let oneof_enum_field = instance_fields
                         .iter()
                         .find(|f| {
                             f.is_instance()
                                 && f.get_offset() as u32 == oneof_variant.oneof_enum_offset
                         })
-                        .unwrap();
-                    let oneof_enum = oneof_enum_field.get_field_type().unwrap();
-                    let f = oneof_enum.get_fields(62);
-                    let oneof_case_enum_field = f
-                        .iter()
-                        .find(|f| {
-                            !f.is_instance()
-                                && f.get_value(Il2CppObject::NULL).unwrap().unbox::<i32>() as u32
-                                    == (field_info.tag >> 3)
-                        })
-                        .unwrap();
+                        .with_context(|| {
+                            format!(
+                                "{type_name}: missing oneof discriminator at 0x{:X}",
+                                oneof_variant.oneof_enum_offset
+                            )
+                        })?;
+                    let oneof_enum = oneof_enum_field.get_field_type()?;
+                    let mut variant_name = None;
+                    for field in oneof_enum.get_fields_il2cpp() {
+                        if field.get_isliteral()?.unbox()
+                            && field.get_value(Il2CppObject::NULL)?.unbox::<i32>() as u32
+                                == (field_info.tag >> 3)
+                        {
+                            variant_name = Some(field.get_name()?.as_str().to_string());
+                            break;
+                        }
+                    }
+                    let variant_name = variant_name.with_context(|| {
+                        format!("{type_name}: oneof case {} is missing", field_info.tag >> 3)
+                    })?;
+                    let group_name = field_names
+                        .get(&oneof_enum_field.get_offset())
+                        .cloned()
+                        .unwrap_or(oneof_enum_field.get_name()?.as_str())
+                        .to_string();
 
-                    let oneof = if let Some(oneof) = oneofs.iter_mut().find(|o| {
-                        o.name == *field_names.get(&oneof_enum_field.get_offset()).unwrap()
-                    }) {
-                        oneof
-                    } else {
-                        oneofs.push(OneOf {
-                            name: field_names
-                                .get(&oneof_enum_field.get_offset())
-                                .unwrap()
-                                .to_string(),
-                            fields: Vec::new(),
-                        });
-                        oneofs.last_mut().unwrap()
-                    };
+                    let oneof =
+                        if let Some(oneof) = oneofs.iter_mut().find(|o| o.name == group_name) {
+                            oneof
+                        } else {
+                            oneofs.push(OneOf {
+                                name: group_name,
+                                fields: Vec::new(),
+                            });
+                            oneofs.last_mut().unwrap()
+                        };
 
                     oneof.fields.push(Field {
                         kind: csharp_type_to_protobuf_type(
@@ -668,11 +682,7 @@ pub fn generate_protobuf<W: Write>(
                             field_info.number_type,
                         )
                         .to_string(),
-                        name: oneof_case_enum_field
-                            .get_name()
-                            .unwrap()
-                            .as_str()
-                            .to_string(),
+                        name: variant_name,
                         number: field_info.tag >> 3,
                         offset: field_info.offset,
                     });
@@ -680,9 +690,9 @@ pub fn generate_protobuf<W: Write>(
             }
 
             ProtoItem::Message(Message {
-                name: type_name.to_string(),
+                name: runtime_type.format_type_name(true),
                 cmd_id: 0,
-                fields: fields.into_iter().map(|f| f.1).collect(),
+                fields,
                 oneofs,
                 children: Vec::new(),
                 has_parent: is_nested,
@@ -697,32 +707,39 @@ pub fn generate_protobuf<W: Write>(
                 .get(&runtime_type.get_base_type().unwrap()),
             Some(&CachedType::Enum)
         ) {
+            let mut variants = Vec::new();
+            for field in runtime_type.get_fields_il2cpp() {
+                if !field.get_isliteral()?.unbox() {
+                    continue;
+                }
+                let mut name = format!("{}_{}", type_name, field.get_name()?.as_str());
+                for attr in field.get_custom_attributes() {
+                    let attr_type = RuntimeType::from_object(attr)?;
+                    if !attr_type.il_name().ends_with(".OriginalNameAttribute") {
+                        continue;
+                    }
+                    for member in attr_type.get_fields_il2cpp() {
+                        if member.is_instance()
+                            && member.get_field_type()?.il_name() == "System.String"
+                            && member.get_name()?.as_str().contains("Name")
+                        {
+                            let value = Il2CppString(member.get_value(attr)?.0);
+                            if !value.is_null() {
+                                name = value.as_str().to_string();
+                            }
+                            break;
+                        }
+                    }
+                }
+                variants.push((name, field.get_value(Il2CppObject::NULL)?.unbox::<i32>()));
+            }
+            variants.sort_by_key(|(_, value)| *value != 0);
+            ensure!(
+                variants.first().is_some_and(|(_, value)| *value == 0),
+                "protobuf enum {type_name} has no zero value"
+            );
             ProtoItem::Enum(Enum {
-                variants: runtime_type
-                    .get_fields(24)
-                    .iter()
-                    .map(|f| {
-                        let attr = f.get_custom_attributes();
-                        let name = if let Some(attr) = attr.first() {
-                            let attr_type = RuntimeType::from_object(*attr).unwrap();
-                            let fields = attr_type.get_fields(62);
-                            let name = fields
-                                .iter()
-                                .find(|v| v.get_name().unwrap().as_str().contains("Name"))
-                                .unwrap();
-
-                            Il2CppString(name.get_value(*attr).unwrap().0)
-                                .as_str()
-                                .to_string()
-                        } else {
-                            format!("{}_{}", type_name, f.get_name().unwrap().as_str())
-                        };
-                        (
-                            name,
-                            f.get_value(Il2CppObject::NULL).unwrap().unbox::<i32>(),
-                        )
-                    })
-                    .collect(),
+                variants,
                 name: runtime_type.format_type_name(true),
                 deobfuscated_name: None,
                 has_parent: is_nested,
@@ -733,7 +750,7 @@ pub fn generate_protobuf<W: Write>(
             }
 
             ProtoItem::Message(Message {
-                name: type_name.to_string(),
+                name: runtime_type.format_type_name(true),
                 cmd_id: 0,
                 fields: Vec::new(),
                 oneofs: Vec::new(),
@@ -750,55 +767,56 @@ pub fn generate_protobuf<W: Write>(
 
         type_to_item.insert(runtime_type, proto_item.clone());
 
-        if is_nested && let Some(parent_rt) = parent_type {
-            if let Some(rc_cell) = type_to_item.get(&parent_rt) {
-                let mut parent_ref = rc_cell.borrow_mut();
-
-                if let ProtoItem::Message(parent_message) = &mut *parent_ref {
-                    parent_message.children.push(proto_item);
-                } else {
-                    log::debug!(
-                        "Parent type {} is not a message for {}",
-                        parent_rt.get_name().unwrap().as_str(),
-                        type_name
-                    );
-                }
-            } else {
-                log::debug!(
-                    "Parent type {} not found for {}",
-                    parent_rt.get_name().unwrap().as_str(),
-                    type_name
-                );
-            }
+        if let Some(parent_rt) = parent_type {
+            parents.push((parent_rt, runtime_type, proto_item));
         }
+    }
+
+    // Metadata declaration order need not put parents before their children.
+    // Resolve ownership after collecting all types so no nested definition is lost.
+    for (parent, child, item) in parents {
+        let parent_item = type_to_item
+            .get(&parent)
+            .with_context(|| format!("missing protobuf parent of {}", child.il_name()))?;
+        let mut parent_item = parent_item.borrow_mut();
+        let ProtoItem::Message(message) = &mut *parent_item else {
+            anyhow::bail!("protobuf parent of {} is not a message", child.il_name());
+        };
+        message.children.push(item);
     }
 
     let (cmd_ids, nt_map) = process_cmd_id(
         &mut type_to_item,
         &rsp_notify_map
             .iter()
-            .map(|(c, cmd_id)| (c.get_name().unwrap().as_str().to_string(), *cmd_id))
+            .map(|(c, cmd_id)| (c.format_type_name(true), *cmd_id))
             .collect::<HashMap<_, _>>(),
         &req_map
             .iter()
-            .map(|(c, (cmd_id, deobf))| {
-                (
-                    c.get_name().unwrap().as_str().to_string(),
-                    (*cmd_id, deobf.clone()),
-                )
-            })
+            .map(|(c, (cmd_id, deobf))| (c.format_type_name(true), (*cmd_id, deobf.clone())))
             .collect::<HashMap<_, _>>(),
+        rsp_notify_names,
         method_nt_map,
     );
 
     apply_global_field_map(&mut type_to_item, predeobf_map);
+    validate_output(&type_to_item)?;
 
     writeln!(
         out,
         "syntax = \"proto3\"; // ex-RushiaLover ProtoDumper | Game Version: {}\n",
-        *crate::version::GAME_VERSION
-    )
-    .unwrap();
+        il2cpp::profile::supported()?.version
+    )?;
+    if type_to_item.values().any(|item| match &*item.borrow() {
+        ProtoItem::Message(message) => message
+            .fields
+            .iter()
+            .chain(message.oneofs.iter().flat_map(|oneof| &oneof.fields))
+            .any(|field| field.kind.contains("google.protobuf.Any")),
+        _ => false,
+    }) {
+        writeln!(out, "import \"google/protobuf/any.proto\";\n")?;
+    }
 
     for proto in type_to_item.values() {
         let proto = proto.borrow();
@@ -814,10 +832,10 @@ pub fn generate_protobuf<W: Write>(
                 }
             }
         }
-        writeln!(out, "{}", proto.fmt_protobuf_with_depth(0)).unwrap();
+        writeln!(out, "{}", proto.fmt_protobuf_with_depth(0))?;
     }
 
-    (cmd_ids, nt_map, type_to_item)
+    Ok((cmd_ids, nt_map, type_to_item))
 }
 
 pub fn apply_global_field_map(type_to_item: &mut TypeToItemMap, map: &HashMap<String, String>) {
@@ -828,11 +846,103 @@ pub fn apply_global_field_map(type_to_item: &mut TypeToItemMap, map: &HashMap<St
     for item in type_to_item.values_mut() {
         let mut item_mut = item.borrow_mut();
         if let ProtoItem::Message(msg) = &mut *item_mut {
-            for field in &mut msg.fields {
-                if let Some(deobf) = map.get(&field.name) {
-                    field.name = deobf.clone();
+            let fields: Vec<_> = msg
+                .fields
+                .iter_mut()
+                .chain(msg.oneofs.iter_mut().flat_map(|oneof| &mut oneof.fields))
+                .collect();
+            let originals: Vec<_> = fields.iter().map(|field| field.name.clone()).collect();
+            let mut proposed: Vec<_> = originals
+                .iter()
+                .map(|name| map.get(name).unwrap_or(name).clone())
+                .collect();
+            loop {
+                let mut counts = HashMap::new();
+                for name in &proposed {
+                    *counts.entry(snake_field(name)).or_insert(0) += 1;
+                }
+                let mut changed = false;
+                for (name, original) in proposed.iter_mut().zip(&originals) {
+                    if *name != *original && counts[&snake_field(name)] > 1 {
+                        *name = original.clone();
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+            for (field, name) in fields.into_iter().zip(proposed) {
+                field.name = name;
+            }
+        }
+    }
+}
+
+fn validate_output(items: &TypeToItemMap) -> anyhow::Result<()> {
+    let mut defined = HashSet::new();
+    for item in items.values() {
+        let item = item.borrow();
+        let name = match &*item {
+            ProtoItem::Message(message) => {
+                message.deobfuscated_name.as_ref().unwrap_or(&message.name)
+            }
+            ProtoItem::Enum(en) => en.deobfuscated_name.as_ref().unwrap_or(&en.name),
+        };
+        ensure!(
+            defined.insert(name.clone()),
+            "duplicate protobuf definition {name}"
+        );
+    }
+    let scalar = [
+        "repeated",
+        "map",
+        "bool",
+        "int32",
+        "int64",
+        "uint32",
+        "uint64",
+        "sint32",
+        "sint64",
+        "fixed32",
+        "fixed64",
+        "sfixed32",
+        "sfixed64",
+        "float",
+        "double",
+        "string",
+        "bytes",
+        "google.protobuf.Any",
+    ];
+    for item in items.values() {
+        let item = item.borrow();
+        if let ProtoItem::Message(message) = &*item {
+            let mut names = HashSet::new();
+            for field in message
+                .fields
+                .iter()
+                .chain(message.oneofs.iter().flat_map(|oneof| &oneof.fields))
+            {
+                let name = snake_field(&field.name);
+                ensure!(
+                    !name.is_empty() && names.insert(name),
+                    "duplicate or empty field name in {}",
+                    message.name
+                );
+                for token in field
+                    .kind
+                    .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.'))
+                    .filter(|part| !part.is_empty())
+                {
+                    ensure!(
+                        scalar.contains(&token) || defined.contains(token),
+                        "{} field {} references missing protobuf type {token}",
+                        message.name,
+                        field.number
+                    );
                 }
             }
         }
     }
+    Ok(())
 }

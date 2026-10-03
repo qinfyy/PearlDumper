@@ -37,8 +37,9 @@ fn run(module: *mut c_void) -> anyhow::Result<()> {
     let length = unsafe { GetModuleFileNameW(Some(HMODULE(module)), &mut path) } as usize;
     if length > 0 && length < path.len() {
         tracing::info!(
-            "Loaded dumper: {}",
-            String::from_utf16_lossy(&path[..length])
+            "Loaded dumper: {}, base=0x{:X}",
+            String::from_utf16_lossy(&path[..length]),
+            module as usize
         );
     } else {
         tracing::warn!(
@@ -98,7 +99,6 @@ unsafe extern "system" fn worker(module: *mut c_void) -> u32 {
     }
 }
 
-#[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn DllMain(instance: HINSTANCE, reason: u32, _: *mut c_void) -> i32 {
     if reason == DLL_PROCESS_ATTACH {

@@ -19,7 +19,7 @@ pub mod playerbasic;
 pub mod region_info;
 pub mod scene_info;
 
-use super::super::output::{ProtoItem, remove_namespace};
+use super::super::output::ProtoItem;
 
 pub enum FieldLogic {
     ByNumber(&'static [(u32, &'static str)]),
@@ -86,7 +86,7 @@ pub fn deobf_fields(
 
                             unsolved_fields.retain(|f| {
                                 if let Some(deobf_name) = global_field_map.get(&f.name) {
-                                    let kind = remove_namespace(&deobf_kind(&f.kind, nt_map));
+                                    let kind = deobf_kind(&f.kind, nt_map);
                                     if let Some(pos) = unused_mappings
                                         .iter()
                                         .position(|(wt, dn)| *wt == kind && *dn == deobf_name)
@@ -107,9 +107,7 @@ pub fn deobf_fields(
                             for wt in wire_types {
                                 let fields_of_type: Vec<_> = unsolved_fields
                                     .iter()
-                                    .filter(|f| {
-                                        remove_namespace(&deobf_kind(&f.kind, nt_map)) == wt
-                                    })
+                                    .filter(|f| deobf_kind(&f.kind, nt_map) == wt)
                                     .collect();
                                 let names_of_type: Vec<_> = unused_mappings
                                     .iter()

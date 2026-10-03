@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use il2cpp::vm::value::Il2CppValue;
 use reflection::runtime_type::RuntimeType;
 
 use crate::proto::util::is_correct_getter;
@@ -22,7 +23,12 @@ pub fn build_game_offset_map(rt: RuntimeType) -> HashMap<usize, String> {
     let mut map = HashMap::new();
     for prop in rt.get_properties(62) {
         if let (Ok(getter), Ok(name)) = (prop.get_get_method(true), prop.get_name()) {
-            let rva = getter.get_il2cpp_method().rva();
+            if getter.is_null() {
+                continue;
+            }
+            let Ok(rva) = getter.get_il2cpp_method().checked_rva() else {
+                continue;
+            };
             if let Some(f) = fields
                 .iter()
                 .find(|f| is_correct_getter(f.get_offset(), rva))

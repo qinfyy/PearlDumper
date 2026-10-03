@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
-use il2cpp::vm::class::Il2CppClass;
 use reflection::runtime_type::RuntimeType;
-use utils::game_assembly_slice;
+use utils::scanner::game_assembly_function;
 
 use crate::proto::output::{ProtoItem, TypeToItemMap};
 
@@ -29,15 +28,21 @@ pub fn process(type_to_item: &TypeToItemMap) -> HashMap<String, String> {
         return map;
     };
 
-    let slice = game_assembly_slice();
+    let Ok(references) = crate::proto::type_references::TypeReferences::from_runtime() else {
+        return map;
+    };
     let ga_base = *il2cpp::GA_BASE;
-    let data = &slice[handler_rva..(handler_rva + 0x1F1).min(slice.len())];
+    let Ok(data) = game_assembly_function(handler_rva) else {
+        return map;
+    };
     let ip = (ga_base + handler_rva) as u64;
 
     let mut decoder = Decoder::with_ip(64, data, ip, DecoderOptions::NONE);
     let mut insn = Instruction::default();
 
-    let obj_new_rva = *crate::proto::IL2CPP_OBJECT_NEW_RVA;
+    let Some(&obj_new_rva) = crate::proto::IL2CPP_OBJECT_NEW_RVA.get() else {
+        return map;
+    };
     let mut proto_reg = Register::None;
     let mut game_reg = Register::None;
     let mut proto_type_va: Option<u64> = None;
@@ -91,25 +96,19 @@ pub fn process(type_to_item: &TypeToItemMap) -> HashMap<String, String> {
             && insn.memory_base() == Register::RIP
         {
             let typeinfo_ptr_addr = insn.memory_displacement64() as usize;
-            if typeinfo_ptr_addr >= ga_base && typeinfo_ptr_addr - ga_base + 8 <= slice.len() {
-                let class = unsafe { *(typeinfo_ptr_addr as *const Il2CppClass) };
-                if RuntimeType::from_class(class).is_ok() {
-                    proto_type_va = Some(typeinfo_ptr_addr as u64);
-                }
+            if references.class_from_slot(typeinfo_ptr_addr).is_some() {
+                proto_type_va = Some(typeinfo_ptr_addr as u64);
             }
         }
 
         if (insn.mnemonic() == Mnemonic::Call || insn.mnemonic() == Mnemonic::Jmp)
-            && insn.near_branch_target() as usize - ga_base == obj_new_rva
+            && crate::proto::native::direct_target(&insn) == Some(ga_base + obj_new_rva)
             && let Some((reg, disp)) = rip_load
             && reg == Register::RCX
         {
             let ptr_addr = disp as usize;
-            if ptr_addr >= ga_base && ptr_addr - ga_base + 8 <= slice.len() {
-                let class = unsafe { *(ptr_addr as *const Il2CppClass) };
-                if RuntimeType::from_class(class).is_ok() {
-                    proto_type_va = Some(ptr_addr as u64);
-                }
+            if references.class_from_slot(ptr_addr).is_some() {
+                proto_type_va = Some(ptr_addr as u64);
             }
         }
 
@@ -134,9 +133,10 @@ pub fn process(type_to_item: &TypeToItemMap) -> HashMap<String, String> {
     }
 
     let ptr_addr = proto_type_va as usize;
-    let proto_type = (ptr_addr >= ga_base && ptr_addr - ga_base + 8 <= slice.len())
-        .then(|| unsafe { *(ptr_addr as *const Il2CppClass) })
-        .and_then(|class| RuntimeType::from_class(class).ok());
+    let proto_type = references
+        .class_from_slot(ptr_addr)
+        .and_then(|class| RuntimeType::from_class(class).ok())
+        .filter(|ty| type_to_item.contains_key(ty));
 
     let Some(proto_type) = proto_type else {
         log::debug!("[Handler NT] GetFriendLoginInfoScRsp: proto type resolve failed");

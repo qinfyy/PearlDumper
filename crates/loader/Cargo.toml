@@ -1,0 +1,25 @@
+[package]
+name = "castorice-dumper"
+version.workspace = true
+edition = "2024"
+
+[lib]
+name = "astrolabe"
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+ansi_term.workspace = true
+env_logger.workspace = true
+il2cpp.workspace = true
+log.workspace = true
+microseh.workspace = true
+tracing.workspace = true
+windows.workspace = true
+dumper.workspace = true
+
+[features]
+default = []
+gateway-network = ["dumper/gateway-network"]

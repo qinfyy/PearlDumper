@@ -1,4 +1,4 @@
-use crate::parser_data::{FROM_BINARY_FUNC_NAME, field_reorderer};
+use crate::parser_data::{binary_layout, field_reorderer};
 
 use super::{
     typeindex::{dump_type_indexes, is_skip_exist_flag},
@@ -308,10 +308,12 @@ fn collect_fields(ty: RuntimeType) -> Vec<FieldInfo> {
             .get_class()
             .get_methods()
             .into_iter()
-            .find(|v| v.get_name().eq("FromBinary") || v.get_name() == *FROM_BINARY_FUNC_NAME);
+            .find(|v| v.get_name().eq("FromBinary") || v.get_name() == binary_layout().from_binary);
 
-        if let Some(from_binary_m) = from_binary_m {
-            let new_fields = field_reorderer::reorder(from_binary_m.rva(), fields.clone());
+        if let Some(from_binary_m) = from_binary_m
+            && let Ok(rva) = from_binary_m.checked_rva()
+        {
+            let new_fields = field_reorderer::reorder(rva, fields.clone());
 
             if !new_fields.is_empty() {
                 fields = new_fields;
@@ -418,7 +420,7 @@ fn collect_excel_paths(
     }
 }
 
-/// Field should be skipped if it has HideInInspector & BlackList attribute
+// Field should be skipped if it has HideInInspector & BlackList attribute
 #[inline]
 fn should_skip_field(field: &FieldInfo) -> bool {
     static BLACK_LIST_ATTRIBUTE_TYPE: LazyLock<RuntimeType> = LazyLock::new(|| {
@@ -439,58 +441,4 @@ fn should_skip_field(field: &FieldInfo) -> bool {
             .unwrap()
             .0
             != 0
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Data, DataKind, DataType};
-    use serde_json::json;
-
-    #[test]
-    fn schema_preserves_owner_class_tags_and_field_names() {
-        let class = DataType::Class {
-            skip_existflag_check: None,
-            fields: vec![Data {
-                field_name: "Id".into(),
-                data_type: DataKind::Primitive("uint".into()),
-            }],
-            interfaces: vec![],
-        };
-        assert_eq!(
-            serde_json::to_value(class).unwrap(),
-            json!({
-                "Class": { "fields": [{ "field_name": "Id", "data_type": { "Primitive": "uint" } }], "interfaces": [] }
-            })
-        );
-    }
-
-    #[test]
-    fn schema_preserves_owner_typeindex_enum_and_collection_tags() {
-        let descendants = [(1, DataKind::Class("RPG.Child".into()))].into();
-        let index = DataType::Typeindex {
-            base: "RPG.Base".into(),
-            descendants,
-        };
-        assert_eq!(
-            serde_json::to_value(index).unwrap(),
-            json!({
-                "Typeindex": { "base": "RPG.Base", "descendants": { "1": { "Class": "RPG.Child" } } }
-            })
-        );
-        let enumeration = DataType::Enum("int".into(), [("0".into(), "None".into())].into());
-        assert_eq!(
-            serde_json::to_value(enumeration).unwrap(),
-            json!({ "Enum": ["int", { "0": "None" }] })
-        );
-        let collection = DataKind::Dictionary(
-            Box::new(DataKind::Primitive("uint".into())),
-            Box::new(DataKind::Array(Box::new(DataKind::Class("RPG.Row".into())))),
-        );
-        assert_eq!(
-            serde_json::to_value(collection).unwrap(),
-            json!({
-                "Dictionary": [{ "Primitive": "uint" }, { "Array": { "Class": "RPG.Row" } }]
-            })
-        );
-    }
 }

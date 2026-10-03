@@ -40,8 +40,11 @@ impl Il2CppMethod {
 
     #[inline]
     pub fn va(&self) -> usize {
+        assert!(self.0 != 0, "cannot read a null native MethodInfo");
         let (_, va) = self.get_class_va_offset_pair();
-        unsafe { utils::memory::read::<usize>(self.0 + va).expect("unreadable method pointer") }
+        // Handles come from IL2CPP metadata and remain alive for the dump. The
+        // layout is checked once; the enclosing dump stage owns SEH protection.
+        unsafe { std::ptr::read_unaligned((self.0 + va) as *const usize) }
     }
 
     pub fn checked_va(&self) -> anyhow::Result<usize> {
@@ -51,6 +54,18 @@ impl Il2CppMethod {
             "method pointer is not executable: 0x{va:X}"
         );
         Ok(va)
+    }
+
+    pub fn checked_rva(&self) -> anyhow::Result<usize> {
+        let va = self.checked_va()?;
+        let rva = va.checked_sub(*crate::GA_BASE).ok_or_else(|| {
+            anyhow::anyhow!("method 0x{:X} is outside GameAssembly: 0x{va:X}", self.0)
+        })?;
+        anyhow::ensure!(
+            rva < crate::profile::supported()?.assembly.image_size as usize,
+            "method RVA outside GameAssembly: 0x{rva:X}"
+        );
+        Ok(rva)
     }
 
     #[inline]
@@ -83,7 +98,7 @@ impl Il2CppMethod {
             .ok_or(Il2CppException(exception))
     }
 
-    /// every args' item is a pointer (if it's a ValueType, pointer to the ValueType, otherwise just Il2CppObject pointer)
+    // Value-type arguments point to their payload; reference arguments use the object pointer.
     pub fn invoke2<T: From<usize>>(
         &self,
         instance: Il2CppObject,

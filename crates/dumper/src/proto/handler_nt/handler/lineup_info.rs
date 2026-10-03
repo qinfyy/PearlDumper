@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 use reflection::runtime_type::RuntimeType;
-use utils::game_assembly_slice;
+use utils::scanner::game_assembly_function;
 
 use crate::proto::output::{ProtoItem, TypeToItemMap};
 
@@ -46,8 +46,9 @@ pub fn process(type_to_item: &TypeToItemMap) -> HashMap<String, String> {
         })
         .unwrap_or_default();
 
-    let slice = game_assembly_slice();
-    let data = &slice[rva..(rva + 0x7C6).min(slice.len())];
+    let Ok(data) = game_assembly_function(rva) else {
+        return map;
+    };
     let ip = (*il2cpp::GA_BASE + rva) as u64;
 
     let mut decoder = Decoder::with_ip(64, data, ip, DecoderOptions::NONE);

@@ -1,7 +1,7 @@
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 use reflection::field_info::FieldInfo;
 use std::collections::{HashMap, HashSet};
-use utils::game_assembly_slice;
+use utils::scanner::game_assembly_function;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum TrackedValue {
@@ -20,6 +20,13 @@ pub fn reorder(rva: usize, targets: Vec<FieldInfo>) -> Vec<FieldInfo> {
         &mut unvisited,
         &mut visited,
     );
+    if !unvisited.is_empty() {
+        log::debug!(
+            "Schema RVA 0x{rva:X}: retaining {} fields not ordered by native analysis",
+            unvisited.len()
+        );
+        ordered.extend(unvisited);
+    }
     ordered
 }
 
@@ -31,24 +38,17 @@ fn collect_offsets(
     visited: &mut HashSet<(usize, Vec<(Register, TrackedValue)>)>,
 ) {
     let state_key = tracked_key(&tracked);
-    if !visited.insert((rva, state_key)) {
+    if visited.len() >= 4096 || !visited.insert((rva, state_key)) {
         return;
     }
 
-    let bytes = game_assembly_slice();
-    let decoder = Decoder::with_ip(64, &bytes[rva..], rva as u64, DecoderOptions::NONE);
-    let mut in_body = false;
+    let Ok(bytes) = game_assembly_function(rva) else {
+        return;
+    };
+    let decoder = Decoder::with_ip(64, bytes, rva as u64, DecoderOptions::NONE);
 
     for instruction in decoder {
-        if unvisited.is_empty() {
-            break;
-        }
-
-        let is_push = instruction.mnemonic() == Mnemonic::Push;
-
-        if !in_body && !is_push {
-            in_body = true;
-        } else if in_body && is_push {
+        if unvisited.is_empty() || instruction.is_invalid() {
             break;
         }
 

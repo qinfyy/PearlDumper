@@ -3,17 +3,21 @@ use il2cpp::{
     GA_BASE,
     api::Il2CppArray,
     get_cached_class, get_native_method,
-    vm::{class::Il2CppClass, object::Il2CppObject, value::Void},
+    vm::{
+        class::Il2CppClass,
+        object::Il2CppObject,
+        value::{Il2CppValue, Void},
+    },
 };
 use reflection::{assembly, method_info::MethodInfo, runtime_type::RuntimeType};
-use utils::game_assembly_slice;
+use utils::scanner::game_assembly_function;
 
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{LazyLock, Mutex},
 };
 
-use crate::parser_data::{BINARY_READER_CLASS, FROM_BINARY_FUNC_NAME};
+use crate::parser_data::binary_layout;
 
 static METHOD_MAP: LazyLock<Mutex<HashMap<Il2CppClass, MethodInfo>>> =
     LazyLock::new(Mutex::default);
@@ -33,13 +37,13 @@ pub fn dump_type_indexes() -> HashMap<Il2CppClass, BTreeMap<u32, Option<Il2CppCl
 
         let Some(from_binary) = get_native_method(&format!(
             "{type_name}::{from_binary_func}({binary_reader_class},{type_name}&)",
-            from_binary_func = *FROM_BINARY_FUNC_NAME,
-            binary_reader_class = *BINARY_READER_CLASS
+            from_binary_func = binary_layout().from_binary,
+            binary_reader_class = binary_layout().reader
         ))
         .or_else(|| {
             get_native_method(&format!(
                 "{type_name}::FromBinary({binary_reader_class},{type_name}&)",
-                binary_reader_class = *BINARY_READER_CLASS
+                binary_reader_class = binary_layout().reader
             ))
         }) else {
             continue;
@@ -86,14 +90,14 @@ pub fn dump_type_indexes() -> HashMap<Il2CppClass, BTreeMap<u32, Option<Il2CppCl
                 }
             }
 
-            let class_after = out.get_class();
+            let class_after = (!out.is_null()).then(|| out.get_class());
 
-            if i > 0 && class_after == class_before {
+            if i > 0 && class_after == Some(class_before) {
                 type_indexes.clear();
                 break;
             }
 
-            type_indexes.insert(i, Some(class_after));
+            type_indexes.insert(i, class_after);
         }
 
         if !type_indexes.is_empty() {
@@ -125,12 +129,12 @@ fn encode_varint(mut value: u32) -> Vec<u8> {
 }
 
 fn create_binary_reader(data: &[u8]) -> Il2CppObject {
-    let class = get_cached_class(&BINARY_READER_CLASS).unwrap();
+    let class = get_cached_class(&binary_layout().reader).unwrap();
     let ty = RuntimeType::from_class(class).unwrap();
     let obj = class.create_instance();
     get_native_method(&format!(
         "{binary_reader_class}::.ctor()",
-        binary_reader_class = *BINARY_READER_CLASS
+        binary_reader_class = binary_layout().reader
     ))
     .unwrap()
     .invoke::<Void>(obj, &[])
@@ -138,7 +142,7 @@ fn create_binary_reader(data: &[u8]) -> Il2CppObject {
 
     let mut arr = Il2CppArray::new(
         get_cached_class("System.Byte").unwrap().get_array_class(1),
-        128,
+        16 * 1024,
     );
     arr.as_mut_slice()[..data.len()].copy_from_slice(data);
 
@@ -155,26 +159,16 @@ fn create_binary_reader(data: &[u8]) -> Il2CppObject {
 pub fn is_skip_exist_flag(class: Il2CppClass) -> Option<bool> {
     let method = METHOD_MAP.lock().unwrap().get(&class).copied()?;
 
-    let rva = method.get_il2cpp_method().rva();
-    let slice = game_assembly_slice();
-    let mut decoder = Decoder::with_ip(
-        64,
-        &slice[rva..],
-        (*GA_BASE + rva) as u64,
-        DecoderOptions::NONE,
-    );
-
-    let mut in_body = false;
+    let rva = method.get_il2cpp_method().checked_rva().ok()?;
+    let bytes = game_assembly_function(rva).ok()?;
+    let mut decoder = Decoder::with_ip(64, bytes, (*GA_BASE + rva) as u64, DecoderOptions::NONE);
 
     while decoder.can_decode() {
         let mut instruction = Instruction::default();
         decoder.decode_out(&mut instruction);
 
-        let is_push = instruction.mnemonic() == Mnemonic::Push;
-        if !in_body && !is_push {
-            in_body = true;
-        } else if in_body && is_push {
-            break;
+        if instruction.is_invalid() {
+            return None;
         }
 
         if instruction.mnemonic() == Mnemonic::Mov

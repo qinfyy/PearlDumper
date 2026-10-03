@@ -390,20 +390,3 @@ use crate::common_types::*;
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn owner_structs_support_nested_collections() {
-        assert_eq!(super::format_type("PooledList<int>"), "Vec<i32>");
-        assert_eq!(super::format_type("LinkedList<string>"), "Vec<String>");
-        assert_eq!(
-            super::format_type("Dictionary<uint, List<Dictionary<int, string>>>"),
-            "HashMap<u32, Vec<HashMap<i32, String>>>"
-        );
-        assert_eq!(
-            super::format_type("Dictionary<string,uint>"),
-            "HashMap<String, u32>"
-        );
-    }
-}

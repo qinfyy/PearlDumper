@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 use reflection::runtime_type::RuntimeType;
-use utils::game_assembly_slice;
+use utils::scanner::game_assembly_function;
 
 use crate::proto::output::{ProtoItem, TypeToItemMap};
 
@@ -69,11 +69,14 @@ pub fn process(type_to_item: &TypeToItemMap) -> HashMap<String, String> {
         })
         .unwrap_or_default();
 
-    let slice = game_assembly_slice();
     let ga_base = *il2cpp::GA_BASE;
-    let data = &slice[handler_rva..(handler_rva + 0x3F0).min(slice.len())];
+    let Ok(data) = game_assembly_function(handler_rva) else {
+        return map;
+    };
     let ip = (ga_base + handler_rva) as u64;
-    let obj_new_rva = *crate::proto::IL2CPP_OBJECT_NEW_RVA;
+    let Some(&obj_new_rva) = crate::proto::IL2CPP_OBJECT_NEW_RVA.get() else {
+        return map;
+    };
 
     let mut decoder = Decoder::with_ip(64, data, ip, DecoderOptions::NONE);
     let mut insn = Instruction::default();
@@ -104,7 +107,7 @@ pub fn process(type_to_item: &TypeToItemMap) -> HashMap<String, String> {
         }
 
         if (insn.mnemonic() == Mnemonic::Call || insn.mnemonic() == Mnemonic::Jmp)
-            && insn.near_branch_target() as usize - ga_base == obj_new_rva
+            && crate::proto::native::direct_target(&insn) == Some(ga_base + obj_new_rva)
         {
             alloc_seen = true;
         }

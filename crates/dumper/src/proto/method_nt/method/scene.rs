@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use il2cpp::vm::value::Il2CppValue;
 use reflection::{attributes::MethodAttributes, runtime_type::RuntimeType};
 
 pub fn get_scene_prop_info_nt() -> HashMap<String, String> {
@@ -18,7 +19,7 @@ pub fn get_scene_prop_info_nt() -> HashMap<String, String> {
     {
         let params = ctor.get_parameters();
         if params.len() > 10
-            && let Ok(param_type) = params[10].get_parameter_type()
+            && let Some(param_type) = super::non_null_type(params[10].get_parameter_type())
         {
             let obf_name = param_type.il_name();
             if obf_name.len() == 11 && obf_name.chars().all(char::is_uppercase) {
@@ -40,7 +41,8 @@ pub fn get_maze_prop_state_nt() -> HashMap<String, String> {
     let strategy_type = il2cpp::get_cached_class("RPG.Client.NavMap.MapData")
         .and_then(|c| RuntimeType::from_class(c).ok())
         .and_then(|rt| rt.get_field("_CrossMapDataStrategy".into(), 62).ok())
-        .and_then(|f| f.get_field_type().ok());
+        .filter(|field| !field.is_null())
+        .and_then(|f| super::non_null_type(f.get_field_type()));
     let Some(strategy_type) = strategy_type else {
         return map;
     };
@@ -51,7 +53,7 @@ pub fn get_maze_prop_state_nt() -> HashMap<String, String> {
             && method
                 .get_attributes()
                 .is_ok_and(|a| a.unbox().contains(MethodAttributes::Private))
-            && let Ok(p0) = params[0].get_parameter_type()
+            && let Some(p0) = super::non_null_type(params[0].get_parameter_type())
         {
             let obf_name = p0
                 .get_generic_arguments()
@@ -78,7 +80,8 @@ pub fn get_scene_monster_wave_nt() -> HashMap<String, String> {
     let monster_reward_type = il2cpp::get_cached_class("RPG.GameCore.LineUpContext")
         .and_then(|c| RuntimeType::from_class(c).ok())
         .and_then(|rt| rt.get_field("MonsterRewardList".into(), 62).ok())
-        .and_then(|f| f.get_field_type().ok());
+        .filter(|field| !field.is_null())
+        .and_then(|f| super::non_null_type(f.get_field_type()));
     let Some(monster_reward_type) = monster_reward_type else {
         return map;
     };
@@ -86,7 +89,7 @@ pub fn get_scene_monster_wave_nt() -> HashMap<String, String> {
         .get_generic_arguments()
         .into_iter()
         .next()
-        .or_else(|| monster_reward_type.get_element_type().ok())
+        .or_else(|| super::non_null_type(monster_reward_type.get_element_type()))
         .unwrap_or(monster_reward_type)
         .get_il2cpp_type()
         .get_class()
@@ -132,7 +135,9 @@ pub fn get_scene_monster_wave_nt() -> HashMap<String, String> {
         let params = method.get_parameters();
         if let (Ok(return_type), Some(param_type)) = (
             method.get_return_type(),
-            params.first().and_then(|p| p.get_parameter_type().ok()),
+            params
+                .first()
+                .and_then(|p| super::non_null_type(p.get_parameter_type())),
         ) {
             let obf_name = param_type
                 .get_generic_arguments()

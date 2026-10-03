@@ -1,285 +1,36 @@
 use std::{
-    borrow::Cow,
     collections::HashMap,
-    io::Write,
-    sync::LazyLock,
+    fs::File,
+    io::{BufWriter, Write},
+    sync::OnceLock,
     time::{Duration, Instant},
 };
 
+use anyhow::Context;
 use cache::{CachedType, TypeCache};
-use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic};
-use il2cpp::{
-    CLASS_TABLE_VEC, get_cached_class, get_native_method,
-    vm::{metadata_cache, value::Il2CppValue},
-};
+use il2cpp::{get_cached_class, get_native_method, vm::metadata_cache};
 use reflection::{property_info::PropertyInfo, runtime_type::RuntimeType};
-use utils::game_assembly_slice;
 
 mod cache;
+mod fields;
 pub mod handler_nt;
 mod logic_nt;
 mod merge_from;
 mod method_nt;
+mod native;
 mod nt;
 mod output;
 mod proto_asm_parser;
 mod proto_stream;
+mod runtime;
 mod type_references;
 pub mod util;
 mod write_to;
 
-static IL2CPP_OBJECT_NEW_API_RVA: LazyLock<usize> = LazyLock::new(|| {
-    il2cpp::api::function_address(130)
-        .expect("invalid object allocation API")
-        .checked_sub(*il2cpp::GA_BASE)
-        .expect("object allocation API is outside GameAssembly")
-});
+static IL2CPP_OBJECT_NEW_RVA: OnceLock<usize> = OnceLock::new();
 
-static IL2CPP_OBJECT_NEW_RVA: LazyLock<usize> = LazyLock::new(|| {
-    let api_rva = *IL2CPP_OBJECT_NEW_API_RVA;
-    let slice = game_assembly_slice();
-    let mut decoder = Decoder::with_ip(
-        64,
-        &slice[api_rva..api_rva + 0x80],
-        (*il2cpp::GA_BASE + api_rva) as u64,
-        DecoderOptions::NONE,
-    );
-    let mut instruction = Instruction::default();
-    while decoder.can_decode() {
-        decoder.decode_out(&mut instruction);
-        if instruction.mnemonic() == Mnemonic::Call {
-            let real_rva = (instruction.near_branch_target() as usize) - *il2cpp::GA_BASE;
-            log::debug!("[Proto Dumper] Il2CppObject::New => 0x{real_rva:X}");
-            return real_rva;
-        }
-        if instruction.mnemonic() == Mnemonic::Ret || instruction.mnemonic() == Mnemonic::Int3 {
-            break;
-        }
-    }
-    log::debug!("[Proto Dumper] failed to find il2cpp_object_new rva, using api rva");
-    api_rva
-});
-
-static XLUA_REGISTER_OBJECT_RVA: LazyLock<usize> = LazyLock::new(|| {
-    let raw_class_name = &*XLUA_OBJECT_TRANSLATOR_STATIC_FIELDS_CLASS;
-    let class_name = raw_class_name
-        .split('<')
-        .next()
-        .unwrap()
-        .trim_end_matches('.');
-    let xlua_object_translator_class = get_cached_class(class_name).unwrap();
-    let static_class_type = RuntimeType::from_class(xlua_object_translator_class).unwrap();
-    let delegate_name = &*XLUA_OBJECT_TRANSLATOR_DELEGATE;
-
-    let methods = static_class_type.get_methods_il2cpp();
-    if let Some(next) = methods
-        .iter()
-        .position(|method| {
-            let params = method.get_parameters();
-            params.len() == 1 && params[0].get_parameter_type().unwrap().il_name() == *delegate_name
-        })
-        .and_then(|idx| methods.get(idx + 1))
-    {
-        let va = next.get_il2cpp_method().va();
-        let rva = va - *il2cpp::GA_BASE;
-        log::debug!("[Proto Dumper] XLua::RegisterObject => 0x{rva:X}");
-        return rva;
-    }
-
-    log::debug!("[Proto Dumper] failed to find XLua::RegisterObject via method index!");
-    panic!("unresolved client layout; see preceding log entry");
-});
-
-static RETCODE_FIELD_NAME: LazyLock<Cow<'static, str>> = LazyLock::new(|| {
-    let cake_race_base_rsp_message_class =
-        get_cached_class("RPG.Client.LittleGame.CakeRace.CakeRaceBaseRspMessage<T>").unwrap();
-
-    let cake_race_type = RuntimeType::from_class(cake_race_base_rsp_message_class).unwrap();
-
-    let base_type = cake_race_type.get_base_type().unwrap();
-    let base_class = base_type.get_il2cpp_type().get_class();
-
-    let properties = base_type.get_properties(62);
-
-    let Some(property) = properties.first() else {
-        log::debug!(
-            "[Proto Dumper] there are no properties in {} to get MsgRetcode",
-            base_class.byval_arg().il_name()
-        );
-        panic!("unresolved client layout; see preceding log entry");
-    };
-
-    let property_name = property.get_name().unwrap().as_str();
-
-    log::debug!("[Proto Dumper] retcode => {property_name}");
-
-    property_name
-});
-
-pub static NETWORK_MANAGER_SEND_NAME: LazyLock<Cow<'static, str>> = LazyLock::new(|| {
-    let cycle_score_service =
-        RuntimeType::from_class(get_cached_class("RPG.Client.CycleScoreService").unwrap()).unwrap();
-
-    let the_class = cycle_score_service.get_base_type().unwrap();
-    for method in the_class.get_methods_il2cpp() {
-        if method.get_is_generic_method().unwrap().unbox() {
-            let params = method.get_parameters();
-            if params.len() == 3
-                && let Some(m_method) = crate::script::METADATA_METHODS
-                    .get()
-                    .unwrap()
-                    .get(&the_class.get_metadata_token())
-                    .and_then(|m| m.get(&method.get_metadata_token()))
-                    .and_then(|m| m.first())
-            {
-                let method_name = m_method.get_name().unwrap().as_str();
-                log::debug!("[Proto Dumper] NetworkManager::Send => {method_name}");
-                return method_name;
-            }
-        }
-    }
-
-    log::debug!("[Proto Dumper] failed to get NetworkManager::Send name");
-    panic!("unresolved client layout; see preceding log entry");
-});
-
-pub static NETWORK_MANAGER_SEND_VA: LazyLock<usize> = LazyLock::new(|| {
-    let cycle_score_service =
-        RuntimeType::from_class(get_cached_class("RPG.Client.CycleScoreService").unwrap()).unwrap();
-
-    let the_class = cycle_score_service.get_base_type().unwrap();
-    for method in the_class.get_methods_il2cpp() {
-        if method.get_is_generic_method().unwrap().unbox() {
-            let params = method.get_parameters();
-            if params.len() == 3
-                && let Some(m_method) = crate::script::METADATA_METHODS
-                    .get()
-                    .unwrap()
-                    .get(&the_class.get_metadata_token())
-                    .and_then(|m| m.get(&method.get_metadata_token()))
-                    .and_then(|m| m.first())
-            {
-                let va = m_method.get_il2cpp_method().va();
-                log::debug!(
-                    "[Proto Dumper] NetworkManager::Send2 => 0x{:X}",
-                    va - *il2cpp::GA_BASE
-                );
-                return va;
-            }
-        }
-    }
-
-    log::debug!("[Proto Dumper] failed to get NetworkManager::Send2");
-    panic!("unresolved client layout; see preceding log entry");
-});
-
-pub static FIGHT_GAME_SEND: LazyLock<usize> = LazyLock::new(|| {
-    let multiplayer_manager =
-        RuntimeType::from_class(get_cached_class("RPG.Client.GlobalVars").unwrap())
-            .unwrap()
-            .get_field("s_MultiplayerManager".into(), 62)
-            .unwrap();
-
-    if !multiplayer_manager.is_null() {
-        let multiplayer_manager = multiplayer_manager.get_field_type().unwrap();
-
-        for method in multiplayer_manager.get_methods_il2cpp() {
-            let params = method.get_parameters();
-            if params.len() == 3
-                && params[1].get_parameter_type().unwrap().il_name() == "System.UInt16"
-            {
-                let va = method.get_il2cpp_method().va();
-                let method_name = method.get_name().unwrap().as_str();
-                log::debug!("[Proto Dumper] FightGame::Send => {method_name}");
-                return va;
-            }
-        }
-    }
-
-    log::debug!("[Proto Dumper] failed to get FightGame::Send");
-    panic!("unresolved client layout; see preceding log entry");
-});
-
-static XLUA_OBJECT_TRANSLATOR_DELEGATE: LazyLock<Cow<'static, str>> = LazyLock::new(|| {
-    let obj_translator_method_class =
-        get_cached_class(&XLUA_OBJECT_TRANSLATOR_METHOD_CLASS).unwrap();
-
-    let Some(obj_translator_method_idx) = CLASS_TABLE_VEC
-        .get()
-        .unwrap()
-        .iter()
-        .position(|&v| v == obj_translator_method_class)
-    else {
-        log::debug!(
-            "[Proto Dumper] failed to find XLUA_OBJECT_TRANSLATOR_METHOD_CLASS to get XLUA_OBJECT_TRANSLATOR_DELEGATE"
-        );
-        panic!("unresolved client layout; see preceding log entry");
-    };
-
-    let the_class =
-        metadata_cache::get_typeinfo_from_typedefindex((obj_translator_method_idx - 1) as u32);
-
-    let the_class_name = the_class.byval_arg().il_name();
-
-    log::debug!("[Proto Dumper] XLUA_OBJECT_TRANSLATOR_DELEGATE => {the_class_name}");
-
-    the_class_name
-});
-
-static XLUA_OBJECT_TRANSLATOR_METHOD_CLASS: LazyLock<Cow<'static, str>> = LazyLock::new(|| {
-    let obj_translator_static_class =
-        get_cached_class(&XLUA_OBJECT_TRANSLATOR_STATIC_FIELDS_CLASS).unwrap();
-
-    let Some(obj_translator_static_idx) = CLASS_TABLE_VEC
-        .get()
-        .unwrap()
-        .iter()
-        .position(|&v| v == obj_translator_static_class)
-    else {
-        log::debug!(
-            "[Proto Dumper] failed to find XLUA_OBJECT_TRANSLATOR_STATIC_FIELDS_CLASS to get XLUA_OBJECT_TRANSLATOR_METHOD_CLASS"
-        );
-        panic!("unresolved client layout; see preceding log entry");
-    };
-
-    let the_class =
-        metadata_cache::get_typeinfo_from_typedefindex((obj_translator_static_idx - 1) as u32);
-
-    let the_class_name = the_class.byval_arg().il_name();
-
-    log::debug!("[Proto Dumper] XLUA_OBJECT_TRANSLATOR_METHOD_CLASS => {the_class_name}");
-
-    the_class_name
-});
-
-static XLUA_OBJECT_TRANSLATOR_STATIC_FIELDS_CLASS: LazyLock<Cow<'static, str>> = LazyLock::new(
-    || {
-        let gen_13_wrap_class = get_cached_class("XLua.CSObjectWrap.Gen_13_Wrap").unwrap();
-
-        let Some(gen_13_wrap_idx) = CLASS_TABLE_VEC
-            .get()
-            .unwrap()
-            .iter()
-            .position(|&v| v == gen_13_wrap_class)
-        else {
-            log::debug!(
-                "[Proto Dumper] failed to find XLua.CSObjectWrap.Gen_13_Wrap to get XLUA_OBJECT_TRANSLATOR_STATIC_FIELDS_CLASS"
-            );
-            panic!("unresolved client layout; see preceding log entry");
-        };
-
-        let the_class =
-            metadata_cache::get_typeinfo_from_typedefindex((gen_13_wrap_idx - 1) as u32);
-
-        let the_class_name = the_class.byval_arg().il_name();
-
-        log::debug!(
-            "[Proto Dumper] XLUA_OBJECT_TRANSLATOR_STATIC_FIELDS_CLASS => {the_class_name}"
-        );
-
-        the_class_name
-    },
-);
+// The 4.6.51 response base BHCEEHPIGFL retains the Retcode property name.
+const RETCODE_FIELD_NAME: &str = "Retcode";
 
 const CODED_INPUT_STREAM: &str = "Google.Protobuf.CodedInputStream";
 const MERGE_FROM: &str = "MergeFrom";
@@ -336,13 +87,13 @@ pub struct OneofVariantInfo {
 
 #[allow(dead_code)]
 pub enum ProtoDumpMode {
+    NativeGetters,
     ClassFieldNumber,
     MergeFrom,
     WriteTo,
     Asm,
 }
 
-#[allow(unused)]
 pub fn dump<W: Write>(
     out: &mut W,
     cmdid_out: &mut W,
@@ -350,25 +101,18 @@ pub fn dump<W: Write>(
     enable_logging: bool,
 ) -> anyhow::Result<()> {
     let started = Instant::now();
-    let request_scan = nt::prepare_request_scan()?;
+    let mut request_scan = nt::prepare_request_scan()?;
+    let field_decoder = fields::FieldDecoder::new()?;
     let type_cache = TypeCache::init();
     if matches!(dump_mode, ProtoDumpMode::MergeFrom | ProtoDumpMode::WriteTo) {
         proto_stream::init();
     }
-
+    let rsp_notify_map = request_scan.registry.responses.clone();
+    let mut req_map = HashMap::new();
+    let mut minimal_info_map = HashMap::<RuntimeType, MessageMinimalInfo>::new();
     log::info!("Recovering protobuf message fields");
     let mut last_progress = Instant::now();
-
-    let mut minimal_info_map = HashMap::<RuntimeType, MessageMinimalInfo>::new();
-    log::info!("Recovering response and notification packet IDs");
-    let mut rsp_notify_map = nt::get_rsp_notify_map();
-    log::info!(
-        "Recovered {} response and notification packet IDs",
-        rsp_notify_map.len()
-    );
-    let mut req_map = HashMap::<RuntimeType, (u16, Option<String>)>::new();
-
-    for i in unsafe { il2cpp::RPG_NETWORK_PROTO_START }..unsafe { il2cpp::RPG_NETWORK_PROTO_END } {
+    for i in unsafe { il2cpp::RPG_NETWORK_PROTO_START..il2cpp::RPG_NETWORK_PROTO_END } {
         if last_progress.elapsed() >= Duration::from_secs(2) {
             log::info!(
                 "Protocol fields: type index {i}/{}, {} messages, {:.1}s elapsed",
@@ -379,30 +123,41 @@ pub fn dump<W: Write>(
             last_progress = Instant::now();
         }
         let proto_class = metadata_cache::get_typeinfo_from_typedefindex(i);
-        let proto_type = RuntimeType::from_class(proto_class).unwrap();
-
-        let Some(merge_from) = proto_type.find_method_il2cpp(MERGE_FROM) else {
+        let proto_type = RuntimeType::from_class(proto_class)
+            .with_context(|| format!("resolving protocol type index {i}"))?;
+        if proto_type.find_method_il2cpp(MERGE_FROM).is_none() {
             continue;
-        };
-
-        let proto_name = proto_type.il_name();
-
-        if enable_logging {
-            log::debug!("[Proto Dumper] Generating minimal info for proto {proto_name}");
         }
-
-        let cmd_id = 0;
-        let mut message_info = MessageMinimalInfo::new(cmd_id);
+        let proto_name = proto_type.il_name();
+        if enable_logging {
+            log::debug!("[Proto Dumper] Generating fields for {proto_name}");
+        }
+        let mut message_info = MessageMinimalInfo::new(
+            request_scan
+                .registry
+                .all
+                .get(&proto_type)
+                .copied()
+                .unwrap_or(0),
+        );
         let write_to_method =
             get_native_method(&format!("{proto_name}::{WRITE_TO}({CODED_OUTPUT_STREAM})"))
-                .unwrap_or_else(|| panic!("{proto_name}::{WRITE_TO}({CODED_OUTPUT_STREAM})"));
+                .with_context(|| {
+                    format!("missing {proto_name}::{WRITE_TO}({CODED_OUTPUT_STREAM})")
+                })?;
         message_info.merge_from_rva =
             get_native_method(&format!("{proto_name}::{MERGE_FROM}({CODED_INPUT_STREAM})"))
-                .unwrap_or_else(|| panic!("{proto_name}::{MERGE_FROM}({CODED_INPUT_STREAM})"))
-                .rva();
-        message_info.write_to_rva = write_to_method.rva();
-
+                .with_context(|| {
+                    format!("missing {proto_name}::{MERGE_FROM}({CODED_INPUT_STREAM})")
+                })?
+                .checked_rva()?;
+        message_info.write_to_rva = write_to_method.checked_rva()?;
         match dump_mode {
+            ProtoDumpMode::NativeGetters => {
+                field_decoder
+                    .recover(proto_type, &mut message_info)
+                    .with_context(|| format!("recovering fields of {proto_name}"))?;
+            }
             ProtoDumpMode::ClassFieldNumber => {
                 util::generate_minimal_info_from_constants(
                     proto_type,
@@ -411,17 +166,15 @@ pub fn dump<W: Write>(
                 );
             }
             ProtoDumpMode::Asm => {
-                // Asm example
                 proto_asm_parser::dump_from_write_to_asm(&proto_name, &mut message_info);
             }
             ProtoDumpMode::MergeFrom => {
                 let proto_instance = proto_class.create_instance();
                 proto_type
                     .find_method_il2cpp(".ctor")
-                    .unwrap()
+                    .context("missing protobuf constructor")?
                     .get_il2cpp_method()
-                    .invoke::<usize>(proto_instance, &[])
-                    .unwrap();
+                    .invoke::<usize>(proto_instance, &[])?;
                 merge_from::dump_merge_from(
                     proto_type,
                     proto_instance,
@@ -431,8 +184,7 @@ pub fn dump<W: Write>(
             }
             ProtoDumpMode::WriteTo => {
                 let ctor_method = get_native_method(&format!("{proto_name}::.ctor()"))
-                    .unwrap_or_else(|| panic!("{proto_name}::.ctor()"));
-
+                    .with_context(|| format!("missing {proto_name}::.ctor()"))?;
                 write_to::dump_writeto(
                     enable_logging,
                     i,
@@ -443,204 +195,172 @@ pub fn dump<W: Write>(
                 );
             }
         }
-
         minimal_info_map.insert(proto_type, message_info);
     }
 
-    log::info!(
-        "Recovered fields for {} protobuf messages; recovering packet IDs",
-        minimal_info_map.len()
-    );
+    let req_rvas = nt::get_req_map(&mut request_scan, &minimal_info_map, &mut req_map)?;
+    let rsp_notify_names = nt::get_rsp_notify_names(&mut request_scan)?;
 
-    let req_rvas = nt::get_req_map(
-        &request_scan,
-        &minimal_info_map,
-        &rsp_notify_map,
-        &mut req_map,
-    )?;
-    let req_named_count = req_map.values().filter(|(_, name)| name.is_some()).count();
-    log::debug!(
-        "[Proto Dumper] req nt: req={}, nt={}",
-        req_map.len(),
-        req_named_count
-    );
+    // Registry coverage and wire fields are independent of optional name hints.
+    // Publish a separately named checkpoint before any naming handler can fail.
+    log::info!("Writing core protocol checkpoint before name recovery");
+    {
+        let mut core_proto = BufWriter::new(File::create("DUMP/StarRail.core.proto.partial")?);
+        let mut core_ids = BufWriter::new(File::create("DUMP/packetIds.core.json.partial")?);
+        let (cmd_ids, _, items) = output::generate_protobuf(
+            &type_cache,
+            &minimal_info_map,
+            &rsp_notify_map,
+            &req_map,
+            &rsp_notify_names,
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut core_proto,
+        )
+        .context("generating core protocol checkpoint")?;
+        validate_packet_ids(&cmd_ids, &items, &request_scan.registry.all)?;
+        serde_json::to_writer_pretty(&mut core_ids, &cmd_ids)?;
+        writeln!(core_ids)?;
+        core_proto.flush()?;
+        core_ids.flush()?;
+        core_proto.get_ref().sync_all()?;
+        core_ids.get_ref().sync_all()?;
+        drop((core_proto, core_ids));
+        std::fs::rename(
+            "DUMP/StarRail.core.proto.partial",
+            "DUMP/StarRail.core.proto",
+        )?;
+        std::fs::rename(
+            "DUMP/packetIds.core.json.partial",
+            "DUMP/packetIds.core.json",
+        )?;
+        log::info!(
+            "Core protocol checkpoint verified: {} messages, {} packet IDs; full name recovery is still pending",
+            minimal_info_map.len(),
+            cmd_ids.len()
+        );
+    }
 
-    let rsp_notify_names = nt::get_rsp_notify_names();
-    let (method_handler_map, method_nt_map) = method_nt::get_method_nt_map();
-
-    let (cmd_ids, proto_name_map, type_to_item) = output::generate_protobuf(
+    log::info!("Recovering protocol names and field names from HSR-OWNER handlers");
+    let (method_handler_map, method_nt_map) = method_nt::get_method_nt_map()
+        .context("protocol name recovery failed; verified core protocol files are retained")?;
+    log::info!("Building named protocol model for field recovery");
+    let (_, proto_name_map, type_to_item) = output::generate_protobuf(
         &type_cache,
         &minimal_info_map,
         &rsp_notify_map,
         &req_map,
+        &rsp_notify_names,
         &method_nt_map,
         &HashMap::new(),
         std::io::sink(),
-    );
+    )?;
 
-    let mut req_rsp_enum_nt = proto_name_map.clone();
-
-    let cs_type_infos = {
-        let mut result_map: HashMap<String, Vec<String>> = HashMap::new();
-        let mut table_entries: Vec<(String, String, usize)> = Vec::new();
-
-        for (rt, req_rvas) in &req_rvas {
-            let valid_rvas: Vec<String> = req_rvas
-                .iter()
-                .filter(|rva| *rva != "0x0")
-                .cloned()
-                .collect();
-
-            if valid_rvas.is_empty() {
-                continue;
-            }
-
-            let formatted_name = rt.format_type_name(true);
-            let obf_name = rt.il_name().into_owned();
-            let deobf_name = proto_name_map
-                .get(&formatted_name)
-                .cloned()
-                .unwrap_or_else(|| formatted_name.clone());
-            result_map.insert(deobf_name.clone(), valid_rvas.clone());
-
-            for rva_str in &valid_rvas {
-                if let Ok(rva) = usize::from_str_radix(rva_str.trim_start_matches("0x"), 16) {
-                    table_entries.push((obf_name.clone(), deobf_name.clone(), rva));
-                }
-            }
+    let mut cs_type_infos: HashMap<String, Vec<String>> = HashMap::new();
+    let mut table_entries = Vec::new();
+    for (ty, rvas) in &req_rvas {
+        let formatted = ty.format_type_name(true);
+        let name = proto_name_map.get(&formatted).cloned().unwrap_or(formatted);
+        cs_type_infos.insert(
+            name.clone(),
+            rvas.iter().map(|rva| format!("0x{rva:X}")).collect(),
+        );
+        for &rva in rvas {
+            table_entries.push((ty.il_name().into_owned(), name.clone(), rva));
         }
+    }
+    let _ = handler_nt::CS_HANDLER_TABLE.set(table_entries);
 
-        let _ = crate::proto::handler_nt::CS_HANDLER_TABLE.set(table_entries);
-
-        result_map
-    };
-
-    let sc_packet_handlers = {
-        let mut method_map: HashMap<RuntimeType, Vec<String>> = HashMap::new();
-        let mut proto_param_map: HashMap<RuntimeType, Vec<String>> = HashMap::new();
-        let rsp_notify_method_rvas = nt::get_rsp_notify_method_rvas();
-
-        for i in 0..unsafe { il2cpp::MAX_TYPEDEFINDEX } {
-            if let Ok(runtime_type) =
-                RuntimeType::from_class(metadata_cache::get_typeinfo_from_typedefindex(i))
-            {
-                for method in runtime_type.get_methods_il2cpp() {
-                    let args = method.get_parameters();
-                    for arg in args {
-                        if let Ok(arg_type) = arg.get_parameter_type()
-                            && arg_type != runtime_type
-                        {
-                            let rva = method.get_il2cpp_method().rva();
-                            if rva != 0 {
-                                method_map
-                                    .entry(arg_type)
-                                    .or_default()
-                                    .push(format!("0x{rva:X}"));
-
-                                if let Ok(arg_name) = arg.get_name()
-                                    && arg_name.as_str() == "proto"
-                                {
-                                    proto_param_map
-                                        .entry(arg_type)
-                                        .or_default()
-                                        .push(format!("0x{rva:X}"));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut result_map: HashMap<String, Vec<String>> = HashMap::new();
-        for rt in rsp_notify_map.keys() {
-            if let Some(handlers) = method_map.get(rt) {
-                let formatted_name = rt.format_type_name(true);
-                let key = rsp_notify_names
-                    .get(&formatted_name)
-                    .cloned()
-                    .unwrap_or_else(|| rt.il_name().into_owned());
-
-                result_map.insert(key, handlers.clone());
-            }
-        }
-        for (formatted_name, cmd_rvas) in rsp_notify_method_rvas {
-            for cmd_rva in cmd_rvas {
-                if cmd_rva != "0x0" {
-                    let key = rsp_notify_names
-                        .get(&formatted_name)
-                        .cloned()
-                        .unwrap_or(formatted_name.clone());
-
-                    result_map.entry(key).or_default().push(cmd_rva);
-                }
-            }
-        }
-
-        for (rt, handlers) in proto_param_map {
-            let il_name = rt.il_name();
-            if il_name.len() == 11 && il_name.chars().all(|c| c.is_ascii_uppercase()) {
-                let formatted_name = rt.format_type_name(true);
-                let key = rsp_notify_names
-                    .get(&formatted_name)
-                    .cloned()
-                    .unwrap_or_else(|| il_name.into_owned());
-
-                result_map.entry(key).or_default().extend(handlers);
-            }
-        }
-
-        for (key, handlers) in method_handler_map {
-            result_map.entry(key).or_default().extend(handlers);
-        }
-
-        result_map
-    };
-
-    let mut proto_field_map = method_nt::dump_global_field_map();
-    for (k, v) in handler_nt::get_handler_nt_map(&type_to_item) {
-        proto_field_map.entry(k).or_insert(v);
+    // Registered delegates are the authoritative receive handlers. Iterating every
+    // method parameter also included serializers and constructors in this output.
+    let mut sc_packet_handlers: HashMap<String, Vec<String>> = HashMap::new();
+    for (ty, rvas) in &request_scan.registry.handlers {
+        let formatted = ty.format_type_name(true);
+        let name = proto_name_map.get(&formatted).cloned().unwrap_or(formatted);
+        sc_packet_handlers
+            .entry(name)
+            .or_default()
+            .extend(rvas.iter().map(|rva| format!("0x{rva:X}")));
+    }
+    for (name, rvas) in method_handler_map {
+        sc_packet_handlers.entry(name).or_default().extend(rvas);
+    }
+    for rvas in sc_packet_handlers.values_mut() {
+        rvas.retain(|rva| rva != "0x0");
+        rvas.sort_unstable();
+        rvas.dedup();
     }
 
-    let logic_field_map = proto_field_map.clone();
+    log::info!("Recovering global protocol field names");
+    let mut proto_field_map = crate::guarded(|| Ok(method_nt::dump_global_field_map()))
+        .context("global protocol field names")?;
+    log::info!("Recovering protocol field names from packet handlers");
+    let handler_fields =
+        handler_nt::get_handler_nt_map(&type_to_item).context("packet handler field names")?;
+    for (key, value) in handler_fields {
+        proto_field_map.entry(key).or_insert(value);
+    }
+    log::info!("Applying protocol logic name rules");
+    crate::guarded(|| {
+        logic_nt::run_logic_nt(
+            &type_to_item.values().cloned().collect::<Vec<_>>(),
+            &proto_name_map,
+            &proto_field_map,
+        );
+        Ok(())
+    })
+    .context("protocol logic name rules")?;
 
-    logic_nt::run_logic_nt(
-        &type_to_item.values().cloned().collect::<Vec<_>>(),
-        &proto_name_map,
-        &logic_field_map,
-    );
-
-    std::fs::write(
-        "./DUMP/cs-type-infos.json",
-        serde_json::to_string_pretty(&cs_type_infos).unwrap(),
-    );
-
-    std::fs::write(
-        "./DUMP/sc-packet-handlers.json",
-        serde_json::to_string_pretty(&sc_packet_handlers).unwrap(),
-    );
-
-    log::debug!("[Proto Dumper] generating protobuf...");
-
-    let (cmd_ids_final, nt_map_final, type_to_item) = output::generate_protobuf(
+    log::info!("Writing final protocol output");
+    let (cmd_ids, _, final_items) = output::generate_protobuf(
         &type_cache,
         &minimal_info_map,
         &rsp_notify_map,
         &req_map,
+        &rsp_notify_names,
         &method_nt_map,
         &proto_field_map,
         out,
-    );
+    )?;
+    validate_packet_ids(&cmd_ids, &final_items, &request_scan.registry.all)?;
+    serde_json::to_writer_pretty(&mut *cmdid_out, &cmd_ids)?;
+    writeln!(cmdid_out)?;
 
-    for (obf_name, deobf_name) in nt_map_final {
-        req_rsp_enum_nt
-            .entry(obf_name)
-            .or_insert_with(|| deobf_name);
+    for (name, value) in [
+        ("cs-type-infos.json", &cs_type_infos),
+        ("sc-packet-handlers.json", &sc_packet_handlers),
+    ] {
+        let mut file = std::fs::File::create(format!("DUMP/{name}.partial"))?;
+        serde_json::to_writer_pretty(&mut file, value)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(format!("DUMP/{name}.partial"), format!("DUMP/{name}"))?;
     }
+    log::info!(
+        "Protocol output verified: {} message definitions, {} packet IDs in {:.2}s",
+        minimal_info_map.len(),
+        cmd_ids.len(),
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
 
-    writeln!(cmdid_out, "{}", serde_json::to_string_pretty(&cmd_ids)?)?;
-
-    log::debug!("[Proto Dumper] Protos dumped!");
-
+fn validate_packet_ids(
+    cmd_ids: &HashMap<i32, String>,
+    items: &output::TypeToItemMap,
+    registry: &HashMap<RuntimeType, u16>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        cmd_ids.len() == registry.len(),
+        "packet ID output is incomplete: {}/{}",
+        cmd_ids.len(),
+        registry.len()
+    );
+    for (&ty, &id) in registry {
+        anyhow::ensure!(
+            items.get(&ty).is_some_and(|item| matches!(&*item.borrow(), output::ProtoItem::Message(message) if message.cmd_id == id)),
+            "CmdId {id} did not reach the protobuf output: {}", ty.il_name()
+        );
+    }
     Ok(())
 }

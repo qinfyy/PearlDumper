@@ -1,4 +1,3 @@
-#[cfg(not(test))]
 mod entry;
 mod logging;
 

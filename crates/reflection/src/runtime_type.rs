@@ -142,16 +142,27 @@ impl RuntimeType {
 impl RuntimeType {
     #[inline]
     pub fn get_il2cpp_type(&self) -> Il2CppType {
-        unsafe { Il2CppType(*((self.0 + 16) as *const usize)) }
+        assert!(!self.is_null(), "cannot read a null RuntimeType");
+        let ty = unsafe { *((self.0 + 16) as *const usize) };
+        assert!(ty != 0, "RuntimeType has a null native type handle");
+        Il2CppType(ty)
     }
 
     #[inline]
     pub fn from_class(class: Il2CppClass) -> Result<Self> {
-        Self::from_il2cpp_type(class.byval_arg())
+        anyhow::ensure!(class.0 != 0, "cannot reflect a null Il2CppClass");
+        let result = Self::from_il2cpp_type(class.byval_arg())?;
+        anyhow::ensure!(
+            !result.is_null(),
+            "class 0x{:X} has no RuntimeType",
+            class.0
+        );
+        Ok(result)
     }
 
     #[inline]
     pub fn from_object(obj: Il2CppObject) -> Result<Self> {
+        anyhow::ensure!(!obj.is_null(), "cannot reflect a null object");
         Self::from_class(obj.get_class())
     }
 
@@ -198,6 +209,7 @@ impl RuntimeType {
             .get_fields()
             .into_iter()
             .filter_map(|f| FieldInfo::from_il2cpp_field(f).ok())
+            .filter(|field| !field.is_null())
             .collect()
     }
 
@@ -212,20 +224,25 @@ impl RuntimeType {
 
     #[inline]
     pub fn get_methods_il2cpp(&self) -> Vec<MethodInfo> {
+        // Unlike Type.GetMethods, the native list also contains constructors.
         self.get_il2cpp_type()
             .get_class()
             .get_methods()
             .into_iter()
             .filter_map(|f| MethodInfo::from_handle(f).ok())
+            .filter(|method| !method.is_null())
             .collect()
     }
 
     #[inline]
     pub fn find_method_il2cpp(&self, name: &str) -> Option<MethodInfo> {
-        self.get_methods_il2cpp()
-            .iter()
-            .find(|m| m.get_name().unwrap().as_str() == name)
-            .copied()
+        self.get_il2cpp_type()
+            .get_class()
+            .get_methods()
+            .into_iter()
+            .find(|method| method.get_name() == name)
+            .and_then(|method| MethodInfo::from_handle(method).ok())
+            .filter(|method| !method.is_null())
     }
 
     #[inline]

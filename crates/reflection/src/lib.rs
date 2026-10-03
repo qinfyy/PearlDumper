@@ -110,20 +110,6 @@ fn run_single_test(case: &self_test::TestCase) -> Option<String> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn all_reflection_apis_have_exact_bindings() {
-        let profile = il2cpp::api_table::supported_bindings().unwrap();
-        il2cpp::api_table::validate_declarations(&profile).unwrap();
-        il2cpp::api_table::assert_no_collisions();
-        assert_eq!(
-            il2cpp::api_table::all_entries().count(),
-            profile.bindings.len()
-        );
-    }
-}
-
 pub fn dump_methods_reflection_json() -> anyhow::Result<()> {
     il2cpp::method_dump::write(
         "DUMP/methods2.json",

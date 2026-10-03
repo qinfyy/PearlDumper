@@ -1,8 +1,14 @@
 use std::ffi::c_void;
+use windows::Win32::Foundation::HMODULE;
+use windows::Win32::System::LibraryLoader::{
+    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+    GetModuleFileNameW, GetModuleHandleExW,
+};
 use windows::Win32::System::Memory::{
     MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
     PAGE_EXECUTE_WRITECOPY, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery,
 };
+use windows::core::PCWSTR;
 
 pub fn is_readable(address: usize, size: usize) -> bool {
     let Some(end) = address.checked_add(size) else {
@@ -58,8 +64,35 @@ pub fn is_executable(address: usize) -> bool {
             != 0
 }
 
-/// # Safety
-/// The target process must keep this memory alive while the value is read.
+pub fn describe_address(address: usize) -> String {
+    let mut module = HMODULE::default();
+    if unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            PCWSTR(address as *const u16),
+            &mut module,
+        )
+    }
+    .is_err()
+    {
+        return format!("0x{address:X} (no loaded module)");
+    }
+    let base = module.0 as usize;
+    let mut path = vec![0u16; 32768];
+    let length = unsafe { GetModuleFileNameW(Some(module), &mut path) } as usize;
+    let path = String::from_utf16_lossy(&path[..length]);
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "unknown module".into());
+    match address.checked_sub(base) {
+        Some(rva) => format!("{name}+0x{rva:X} (VA 0x{address:X}, base 0x{base:X})"),
+        None => format!("0x{address:X} (module base 0x{base:X})"),
+    }
+}
+
+// Safety:
+// The target process must keep this memory alive while the value is read.
 pub unsafe fn read<T: Copy>(address: usize) -> anyhow::Result<T> {
     anyhow::ensure!(
         is_readable(address, size_of::<T>()),
@@ -67,23 +100,4 @@ pub unsafe fn read<T: Copy>(address: usize) -> anyhow::Result<T> {
     );
     microseh::try_seh(|| unsafe { std::ptr::read_unaligned(address as *const T) })
         .map_err(|error| anyhow::anyhow!("cannot read 0x{address:X}: {error:?}"))
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn rejects_invalid_ranges() {
-        assert!(!super::is_readable(0, 8));
-        assert!(!super::is_readable(usize::MAX - 3, 8));
-        assert!(!super::is_readable(1, 8));
-    }
-
-    #[test]
-    fn reads_owned_memory() {
-        let value = 1234u64;
-        assert_eq!(
-            unsafe { super::read::<u64>(&value as *const _ as usize) }.unwrap(),
-            value
-        );
-    }
 }

@@ -21,7 +21,7 @@ pub struct MethodInfo(pub usize);
 #[il2cpp_api("System.Reflection.MonoMethod")]
 impl MethodInfo {
     #[method("get_ReturnType", 6)]
-    pub fn get_return_type(&self) -> Result<RuntimeType>;
+    fn get_return_type_internal(&self) -> Result<RuntimeType>;
 
     #[method("GetParameters", 9)]
     fn get_parameters_internal(&self) -> Result<Il2CppArray>;
@@ -63,6 +63,24 @@ impl MethodInfo {
 
 #[allow(unused)]
 impl MethodInfo {
+    pub fn get_return_type(&self) -> anyhow::Result<RuntimeType> {
+        anyhow::ensure!(!self.is_null(), "null MethodInfo has no return type");
+        let method = self.get_il2cpp_method();
+        let name = method.get_name();
+        // Native method enumeration includes MonoCMethod objects. Constructors
+        // do not implement MonoMethod's ReturnType slot; native signatures still
+        // provide System.Void for C# and script output without virtual dispatch.
+        let result = if matches!(name.as_ref(), ".ctor" | ".cctor") {
+            let ty = il2cpp::api::il2cpp_method_get_return_type(method);
+            anyhow::ensure!(!ty.is_null(), "null native return type for {name}");
+            RuntimeType::from_il2cpp_type(ty)?
+        } else {
+            self.get_return_type_internal()?
+        };
+        anyhow::ensure!(!result.is_null(), "null return type for method {name}");
+        Ok(result)
+    }
+
     #[inline]
     pub fn get_generic_arguments(&self) -> Vec<RuntimeType> {
         unsafe {
@@ -90,7 +108,13 @@ impl MethodInfo {
 
     #[inline]
     pub fn get_il2cpp_method(&self) -> Il2CppMethod {
-        unsafe { Il2CppMethod(*((self.0 + 0x10) as *const usize)) }
+        assert!(!self.is_null(), "cannot read a null MethodInfo");
+        let method = unsafe { *((self.0 + 0x10) as *const usize) };
+        assert!(
+            method != 0,
+            "reflection MethodInfo has a null native handle"
+        );
+        Il2CppMethod(method)
     }
 
     #[inline]

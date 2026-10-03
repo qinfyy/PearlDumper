@@ -32,7 +32,7 @@ impl Il2CppType {
     }
 
     #[inline]
-    /// TODO: Not actually using the formatting
+    // TODO: Not actually using the formatting
     pub fn get_name(&self, format: Il2CppTypeNameFormat) -> Cow<'static, str> {
         unsafe { utils::cstr_to_str(api::il2cpp_type_get_name(*self)) }
     }

@@ -124,17 +124,20 @@ macro_rules! il2cpp_api {
         #[allow(clippy::not_unsafe_ptr_arg_deref)]
         #[inline(always)]
         pub fn $name($($arg_name: $arg_type,)*) -> $ret_type {
-            use std::sync::Once;
-            static ONCE: Once = Once::new();
+            use std::sync::OnceLock;
+            static ADDRESS: OnceLock<usize> = OnceLock::new();
 
             unsafe {
-                let rva = (*super::API_BASE_PTR) + 8 * $index;
-                let address = function_address($index).expect("invalid IL2CPP API slot");
-                ONCE.call_once(|| {
+                // The API table is stable after readiness. Validate each address on
+                // first use; repeated metadata reads must not re-query process memory.
+                let address = *ADDRESS.get_or_init(|| {
+                    let rva = (*super::API_BASE_PTR) + 8 * $index;
+                    let address = function_address($index).expect("invalid IL2CPP API slot");
                     log::debug!(
                         "{}: slot {}, UnityPlayer+0x{rva:X} -> 0x{address:X}",
                         stringify!($name), $index
                     );
+                    address
                 });
 
                 type FuncType = unsafe extern "C" fn($($arg_type,)*) -> $ret_type;
@@ -149,17 +152,20 @@ macro_rules! il2cpp_api {
     ) => {
         #[inline(always)]
         pub fn $func_name < $($generic : $bound),+ > ($($arg_name: $arg_type),*) -> $ret_type {
-            use std::sync::Once;
-            static ONCE: Once = Once::new();
+            use std::sync::OnceLock;
+            static ADDRESS: OnceLock<usize> = OnceLock::new();
 
             unsafe {
-                let rva = (*super::API_BASE_PTR) + 8 * $index;
-                let address = function_address($index).expect("invalid IL2CPP API slot");
-                ONCE.call_once(|| {
+                // The API table is stable after readiness. Validate each address on
+                // first use; repeated metadata reads must not re-query process memory.
+                let address = *ADDRESS.get_or_init(|| {
+                    let rva = (*super::API_BASE_PTR) + 8 * $index;
+                    let address = function_address($index).expect("invalid IL2CPP API slot");
                     log::debug!(
                         "{}: slot {}, UnityPlayer+0x{rva:X} -> 0x{address:X}",
                         stringify!($func_name), $index
                     );
+                    address
                 });
 
                 ::std::mem::transmute::<usize, extern "C" fn($($arg_type),*) -> $ret_type>(

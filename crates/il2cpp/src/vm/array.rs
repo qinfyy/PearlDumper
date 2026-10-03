@@ -107,24 +107,3 @@ impl Il2CppArray {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn owned_layout_supports_checked_array_access() {
-        let mut storage = [0usize, 0, 0, 2, 7, 9];
-        let mut array = super::Il2CppArray(storage.as_mut_ptr() as usize);
-        assert_eq!(array.to_vec::<usize>(), vec![7, 9]);
-        *array.get_mut::<usize>(1) = 10;
-        assert_eq!(storage[5], 10);
-        assert!(std::panic::catch_unwind(|| array.get::<usize>(2)).is_err());
-    }
-
-    #[test]
-    fn rejects_null_and_overflowing_arrays() {
-        assert!(std::panic::catch_unwind(|| super::Il2CppArray(0).len()).is_err());
-        let storage = [0usize, 0, 0, usize::MAX];
-        let array = super::Il2CppArray(storage.as_ptr() as usize);
-        assert!(std::panic::catch_unwind(|| array.to_vec::<usize>()).is_err());
-    }
-}

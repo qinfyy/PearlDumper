@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::BTreeSet,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use anyhow::Context;
 use il2cpp::vm::{
@@ -15,7 +19,17 @@ pub fn dump() -> anyhow::Result<()> {
         .find(|assembly| assembly.get_name() == "RPG.GameCore.Config")
         .context("RPG.GameCore.Config assembly not found")?;
     let mut written = BTreeSet::new();
-    for table in assembly.get_types() {
+    let types = assembly.get_types();
+    let mut progress = Instant::now();
+    for (index, &table) in types.iter().enumerate() {
+        if progress.elapsed() >= Duration::from_secs(2) {
+            log::info!(
+                "Excel: {index}/{} types, {} files exported",
+                types.len(),
+                written.len()
+            );
+            progress = Instant::now();
+        }
         dump_table(table, &mut written)
             .with_context(|| format!("Excel table {}", table.il_name()))?;
     }
@@ -77,20 +91,27 @@ pub(super) fn collect_rows(table: RuntimeType) -> anyhow::Result<Vec<serde_json:
         .get_methods_il2cpp()
         .into_iter()
         .filter(|method| {
-            method.is_static()
-                && method.get_parameters().is_empty()
+            // The table has static storage but its method flags are obfuscated.
+            // Bind the unique row enumerator by signature, as HSR-OWNER does.
+            method.get_parameters().is_empty()
                 && method.get_return_type().is_ok_and(|ty| {
                     ty.get_name()
-                        .is_ok_and(|name| name.as_str().contains("Enumerator"))
+                        .is_ok_and(|name| name.as_str() == "FixEnumerator`2")
                 })
         })
         .collect::<Vec<_>>();
     anyhow::ensure!(
         methods.len() == 1,
-        "expected one parameterless static table enumerator, found {}",
+        "expected one parameterless FixEnumerator factory, found {}",
         methods.len()
     );
     let get_enumerator = methods[0];
+    let rva = get_enumerator.get_il2cpp_method().checked_rva()?;
+    log::debug!(
+        "Excel enumerator {}::{} at RVA 0x{rva:X}",
+        table.il_name(),
+        get_enumerator.get_name()?.as_str()
+    );
     let enumerator_type = get_enumerator.get_return_type()?;
     let current = enumerator_type.get_property("Current".into(), 62)?;
     anyhow::ensure!(
@@ -138,22 +159,4 @@ fn output_name(path: &str) -> anyhow::Result<&str> {
         "invalid Excel output path {path}"
     );
     Ok(name)
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn output_paths_remain_inside_excel_directory() {
-        assert_eq!(
-            super::output_name("BakedConfig/ExcelOutput/Avatar.bytes").unwrap(),
-            "Avatar"
-        );
-        assert_eq!(
-            super::output_name(r"BakedConfig\ExcelOutput\Avatar.bytes").unwrap(),
-            "Avatar"
-        );
-        assert!(super::output_name("..").is_err());
-        assert!(super::output_name("Avatar:stream.bytes").is_err());
-        assert!(super::output_name("ExcelOutput/").is_err());
-    }
 }

@@ -46,7 +46,7 @@ impl Interceptor {
         }
     }
 
-    /// # Safety
+    // Safety:
     pub unsafe fn detach(&mut self) {
         for hook in self.hooks.drain(..) {
             unsafe {

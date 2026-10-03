@@ -1,6 +1,7 @@
 use reflection::attributes::MethodAttributes;
 use std::collections::HashMap;
 
+use il2cpp::vm::value::Il2CppValue;
 use reflection::runtime_type::RuntimeType;
 
 pub fn get_challenge_history_nt() -> HashMap<String, String> {
@@ -24,7 +25,7 @@ pub fn get_challenge_history_nt() -> HashMap<String, String> {
     for method in history_type.get_methods_il2cpp() {
         let params = method.get_parameters();
         if params.len() == 1
-            && let Ok(param_type) = params[0].get_parameter_type()
+            && let Some(param_type) = super::non_null_type(params[0].get_parameter_type())
             && param_type.il_name().contains("IEnumerable")
             && let Some(inner) = param_type.get_generic_arguments().into_iter().next()
         {
@@ -43,41 +44,7 @@ pub fn get_challenge_history_nt() -> HashMap<String, String> {
 }
 
 pub fn get_challengepeak_nt() -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    let start = unsafe { il2cpp::ASSEMBLY_CSHARP_START };
-    let max = unsafe { il2cpp::MAX_TYPEDEFINDEX };
-    for i in start..max {
-        let Ok(rt) = RuntimeType::from_class(
-            il2cpp::vm::metadata_cache::get_typeinfo_from_typedefindex(i),
-        ) else {
-            continue;
-        };
-
-        for method in rt.get_methods_il2cpp() {
-            let Ok(m_name) = method.get_name() else {
-                continue;
-            };
-            if !m_name.as_str().contains("<_GetPeakData") {
-                continue;
-            }
-            let params = method.get_parameters();
-            let Some(param) = params.first() else {
-                continue;
-            };
-            let Ok(param_type) = param.get_parameter_type() else {
-                continue;
-            };
-            let obf_name = param_type.il_name().into_owned();
-            if obf_name.len() == 11 && obf_name.chars().all(char::is_uppercase) {
-                log::debug!("[Method NT] param nt: {obf_name} -> ChallengePeak");
-                map.insert(obf_name, "ChallengePeak".to_string());
-            }
-        }
-    }
-    if map.is_empty() {
-        log::debug!("[Method NT] failed to find ChallengePeak nt");
-    }
-    map
+    super::get_callback_parameter_nt(&[("<_GetPeakData", "ChallengePeak")])
 }
 
 pub fn get_challenge_peak_group_nt() -> HashMap<String, String> {
@@ -86,13 +53,14 @@ pub fn get_challenge_peak_group_nt() -> HashMap<String, String> {
     let server_agent_type = il2cpp::get_cached_class("RPG.Client.ChallengePeakModule")
         .and_then(|c| RuntimeType::from_class(c).ok())
         .and_then(|rt| rt.get_field("_ServerAgent".into(), 62).ok())
-        .and_then(|f| f.get_field_type().ok());
+        .filter(|field| !field.is_null())
+        .and_then(|f| super::non_null_type(f.get_field_type()));
     let Some(server_agent_type) = server_agent_type else {
         return map;
     };
 
     for field in server_agent_type.get_fields_il2cpp() {
-        if let Ok(ft) = field.get_field_type() {
+        if let Some(ft) = super::non_null_type(field.get_field_type()) {
             let ft_name = ft.il_name();
             if !ft_name.contains("Dictionary") {
                 continue;
@@ -122,7 +90,8 @@ pub fn get_cur_tierce_challenge_nt() -> HashMap<String, String> {
     )
     .and_then(|c| RuntimeType::from_class(c).ok())
     .and_then(|rt| rt.get_field("_Repository".into(), 62).ok())
-    .and_then(|f| f.get_field_type().ok());
+    .filter(|field| !field.is_null())
+    .and_then(|f| super::non_null_type(f.get_field_type()));
     let Some(repo_type) = repo_type else {
         return map;
     };
@@ -136,9 +105,9 @@ pub fn get_cur_tierce_challenge_nt() -> HashMap<String, String> {
             && method
                 .get_attributes()
                 .is_ok_and(|a| !a.unbox().contains(MethodAttributes::Public))
-            && let (Ok(t0), Ok(t1)) = (
-                params[0].get_parameter_type(),
-                params[1].get_parameter_type(),
+            && let (Some(t0), Some(t1)) = (
+                super::non_null_type(params[0].get_parameter_type()),
+                super::non_null_type(params[1].get_parameter_type()),
             )
         {
             let n0 = t0.il_name();
@@ -164,32 +133,20 @@ pub fn get_cur_tierce_challenge_nt() -> HashMap<String, String> {
 pub fn get_challenge_tierce_handler_nt() -> HashMap<String, String> {
     let mut map = HashMap::new();
 
-    let start = unsafe { il2cpp::ASSEMBLY_CSHARP_START };
-    let max = unsafe { il2cpp::MAX_TYPEDEFINDEX };
-
-    let handler_class = (start..max).find_map(|i| {
-        let Ok(rt) = RuntimeType::from_class(
-            il2cpp::vm::metadata_cache::get_typeinfo_from_typedefindex(i),
-        ) else {
-            return None;
-        };
-
-        let fields: Vec<_> = rt.get_fields_il2cpp();
-        let has_big = fields
-            .iter()
-            .any(|f| f.get_name().is_ok_and(|n| n.as_str() == "OnBigSettle"));
-        let has_medal = fields
-            .iter()
-            .any(|f| f.get_name().is_ok_and(|n| n.as_str() == "OnMedal"));
-        let has_clear = fields
-            .iter()
-            .any(|f| f.get_name().is_ok_and(|n| n.as_str() == "OnStageClear"));
-        if has_big && has_medal && has_clear {
-            Some(rt)
-        } else {
-            None
-        }
-    });
+    let classes = il2cpp::CLASS_TABLE_VEC.get().expect("missing class cache");
+    let handler_class = classes[unsafe { il2cpp::ASSEMBLY_CSHARP_START } as usize..]
+        .iter()
+        .find_map(|&class| {
+            let fields = class.get_fields();
+            let has_big = fields.iter().any(|f| f.get_name() == "OnBigSettle");
+            let has_medal = fields.iter().any(|f| f.get_name() == "OnMedal");
+            let has_clear = fields.iter().any(|f| f.get_name() == "OnStageClear");
+            if has_big && has_medal && has_clear {
+                RuntimeType::from_class(class).ok()
+            } else {
+                None
+            }
+        });
 
     let Some(handler) = handler_class else {
         log::debug!("[Method NT] failed to find challenge tierce handler nt");
@@ -205,7 +162,9 @@ pub fn get_challenge_tierce_handler_nt() -> HashMap<String, String> {
         let params = method.get_parameters();
         if let (Ok(m_name), Some(param_type)) = (
             method.get_name(),
-            params.first().and_then(|p| p.get_parameter_type().ok()),
+            params
+                .first()
+                .and_then(|p| super::non_null_type(p.get_parameter_type())),
         ) {
             let m_name_str = m_name.as_str();
             let obf_name =
