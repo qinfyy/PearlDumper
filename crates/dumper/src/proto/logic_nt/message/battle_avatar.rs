@@ -2,6 +2,8 @@ pub const BATTLEAVATAR_MESSAGES: &[&str] = &[
     "BattleMonsterParam",
     "Obf",
     "Obf",
+    // 4.6.51 inserts the monster-extra oneof before BattleMonster.
+    "Obf",
     "BattleMonster",
     "BattleMonsterWave",
     "BattleBuff",

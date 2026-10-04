@@ -204,10 +204,10 @@ pub fn dump<W: Write>(
     // Registry coverage and wire fields are independent of optional name hints.
     // Publish a separately named checkpoint before any naming handler can fail.
     log::info!("Writing core protocol checkpoint before name recovery");
-    {
+    let (core_names, mut type_to_item) = {
         let mut core_proto = BufWriter::new(File::create("DUMP/StarRail.core.proto.partial")?);
         let mut core_ids = BufWriter::new(File::create("DUMP/packetIds.core.json.partial")?);
-        let (cmd_ids, _, items) = output::generate_protobuf(
+        let (cmd_ids, names, items) = output::generate_protobuf(
             &type_cache,
             &minimal_info_map,
             &rsp_notify_map,
@@ -239,15 +239,16 @@ pub fn dump<W: Write>(
             minimal_info_map.len(),
             cmd_ids.len()
         );
-    }
+        (names, items)
+    };
 
     log::info!("Recovering protocol names and field names from HSR-OWNER handlers");
-    let (method_handler_map, method_nt_map) = method_nt::get_method_nt_map()
+    let (method_handler_map, mut method_nt_map) = method_nt::get_method_nt_map()
         .context("protocol name recovery failed; verified core protocol files are retained")?;
     log::info!("Building named protocol model for field recovery");
-    let (_, proto_name_map, type_to_item) = output::generate_protobuf(
-        &type_cache,
-        &minimal_info_map,
+    let (_, proto_name_map) = output::finish_protobuf(
+        &mut type_to_item,
+        &core_names,
         &rsp_notify_map,
         &req_map,
         &rsp_notify_names,
@@ -301,20 +302,28 @@ pub fn dump<W: Write>(
         proto_field_map.entry(key).or_insert(value);
     }
     log::info!("Applying protocol logic name rules");
-    crate::guarded(|| {
+    let recovered = crate::guarded(|| {
         logic_nt::run_logic_nt(
             &type_to_item.values().cloned().collect::<Vec<_>>(),
             &proto_name_map,
             &proto_field_map,
-        );
-        Ok(())
+        )
     })
     .context("protocol logic name rules")?;
+    for (obfuscated, name) in recovered.types {
+        let has_explicit_name = proto_name_map
+            .get(&obfuscated)
+            .is_some_and(|known| known != &obfuscated);
+        if !has_explicit_name {
+            method_nt_map.entry(obfuscated).or_insert(name);
+        }
+    }
+    proto_field_map = recovered.fields;
 
     log::info!("Writing final protocol output");
-    let (cmd_ids, _, final_items) = output::generate_protobuf(
-        &type_cache,
-        &minimal_info_map,
+    let (cmd_ids, final_names) = output::finish_protobuf(
+        &mut type_to_item,
+        &proto_name_map,
         &rsp_notify_map,
         &req_map,
         &rsp_notify_names,
@@ -322,9 +331,52 @@ pub fn dump<W: Write>(
         &proto_field_map,
         out,
     )?;
-    validate_packet_ids(&cmd_ids, &final_items, &request_scan.registry.all)?;
+    validate_packet_ids(&cmd_ids, &type_to_item, &request_scan.registry.all)?;
     serde_json::to_writer_pretty(&mut *cmdid_out, &cmd_ids)?;
     writeln!(cmdid_out)?;
+
+    let original_names: HashMap<_, _> = proto_name_map
+        .iter()
+        .map(|(obf, name)| (name.as_str(), obf.as_str()))
+        .collect();
+    for handlers in [&mut cs_type_infos, &mut sc_packet_handlers] {
+        let mut renamed = HashMap::<String, Vec<String>>::new();
+        for (name, rvas) in handlers.drain() {
+            let original = original_names.get(name.as_str()).copied().unwrap_or(&name);
+            let name = final_names
+                .get(original)
+                .map(String::as_str)
+                .unwrap_or(original)
+                .to_owned();
+            renamed.entry(name).or_default().extend(rvas);
+        }
+        for rvas in renamed.values_mut() {
+            rvas.sort_unstable();
+            rvas.dedup();
+        }
+        *handlers = renamed;
+    }
+    // Keep the raw identities available without making packetIds point at absent definitions.
+    let obfuscated_ids: HashMap<_, _> = type_to_item
+        .values()
+        .filter_map(|item| {
+            let item = item.borrow();
+            match &*item {
+                output::ProtoItem::Message(message) if message.cmd_id != 0 => {
+                    Some((i32::from(message.cmd_id), message.name.clone()))
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    let mut raw_ids = File::create("DUMP/packetIds.obfuscated.json.partial")?;
+    serde_json::to_writer_pretty(&mut raw_ids, &obfuscated_ids)?;
+    raw_ids.sync_all()?;
+    drop(raw_ids);
+    std::fs::rename(
+        "DUMP/packetIds.obfuscated.json.partial",
+        "DUMP/packetIds.obfuscated.json",
+    )?;
 
     for (name, value) in [
         ("cs-type-infos.json", &cs_type_infos),
@@ -358,7 +410,7 @@ fn validate_packet_ids(
     );
     for (&ty, &id) in registry {
         anyhow::ensure!(
-            items.get(&ty).is_some_and(|item| matches!(&*item.borrow(), output::ProtoItem::Message(message) if message.cmd_id == id)),
+            items.get(&ty).is_some_and(|item| matches!(&*item.borrow(), output::ProtoItem::Message(message) if message.cmd_id == id && cmd_ids.get(&i32::from(id)) == Some(message.deobfuscated_name.as_ref().unwrap_or(&message.name)))),
             "CmdId {id} did not reach the protobuf output: {}", ty.il_name()
         );
     }

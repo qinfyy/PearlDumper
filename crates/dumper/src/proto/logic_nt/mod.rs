@@ -7,11 +7,16 @@ pub mod message;
 
 use super::output::ProtoItem;
 
+pub struct NameRecovery {
+    pub types: HashMap<String, String>,
+    pub fields: HashMap<String, String>,
+}
+
 pub fn run_logic_nt(
     items: &[Rc<RefCell<ProtoItem>>],
     message_nt_map: &HashMap<String, String>,
     predeobf_map: &HashMap<String, String>,
-) {
+) -> anyhow::Result<NameRecovery> {
     let mut nt_map: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
     let mut global_field_map: HashMap<String, String> = predeobf_map.clone();
 
@@ -32,6 +37,25 @@ pub fn run_logic_nt(
             .map(|(k, v)| format!("{k} {v}"))
             .collect::<Vec<_>>()
             .join("\n");
-        std::fs::write("./DUMP/nt.txt", output_content).expect("failed to write nt.txt");
+        std::fs::write("./DUMP/nt.txt.partial", output_content)?;
+        std::fs::rename("./DUMP/nt.txt.partial", "./DUMP/nt.txt")?;
     }
+    // nt.txt mixes fields and types. Only actual type identities may rename definitions.
+    let types = items
+        .iter()
+        .filter_map(|item| {
+            let item = item.borrow();
+            let name = match &*item {
+                ProtoItem::Message(message) => &message.name,
+                ProtoItem::Enum(en) => &en.name,
+            };
+            nt_map
+                .get(name)
+                .map(|recovered| (name.clone(), recovered.clone()))
+        })
+        .collect();
+    Ok(NameRecovery {
+        types,
+        fields: global_field_map,
+    })
 }

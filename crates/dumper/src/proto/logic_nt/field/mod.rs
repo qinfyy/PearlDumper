@@ -141,11 +141,7 @@ pub fn deobf_fields(
 }
 
 fn deobf_kind(kind: &str, nt_map: &indexmap::IndexMap<String, String>) -> String {
-    let mut result = kind.to_string();
-    for (obf, deobf) in nt_map {
-        if obf.len() == 11 && obf.chars().all(|c| c.is_ascii_uppercase()) {
-            result = result.replace(obf.as_str(), deobf.as_str());
-        }
-    }
-    result
+    crate::proto::output::rewrite_type_tokens(kind, |name| {
+        nt_map.get(name).cloned().unwrap_or_else(|| name.to_owned())
+    })
 }

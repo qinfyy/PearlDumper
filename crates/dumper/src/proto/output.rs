@@ -261,7 +261,7 @@ fn qualified_field_type(kind: &str) -> String {
     })
 }
 
-fn rewrite_type_tokens(kind: &str, mut rename: impl FnMut(&str) -> String) -> String {
+pub(super) fn rewrite_type_tokens(kind: &str, mut rename: impl FnMut(&str) -> String) -> String {
     kind.split_inclusive(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '.'))
         .map(|part| {
             let end = part
@@ -414,7 +414,14 @@ fn process_cmd_id(
                     };
                 }
                 if message.cmd_id != 0 {
-                    cmd_ids.insert(i32::from(message.cmd_id), message.name.clone());
+                    cmd_ids.insert(
+                        i32::from(message.cmd_id),
+                        message
+                            .deobfuscated_name
+                            .as_ref()
+                            .unwrap_or(&message.name)
+                            .clone(),
+                    );
                 }
             }
             ProtoItem::Enum(en) => {
@@ -785,8 +792,50 @@ pub fn generate_protobuf<W: Write>(
         message.children.push(item);
     }
 
-    let (cmd_ids, nt_map) = process_cmd_id(
+    let (cmd_ids, nt_map) = finish_protobuf(
         &mut type_to_item,
+        &HashMap::new(),
+        rsp_notify_map,
+        req_map,
+        rsp_notify_names,
+        method_nt_map,
+        predeobf_map,
+        &mut out,
+    )?;
+    Ok((cmd_ids, nt_map, type_to_item))
+}
+
+pub(super) fn finish_protobuf<W: Write>(
+    type_to_item: &mut TypeToItemMap,
+    previous_names: &HashMap<String, String>,
+    rsp_notify_map: &HashMap<RuntimeType, u16>,
+    req_map: &HashMap<RuntimeType, (u16, Option<String>)>,
+    rsp_notify_names: &HashMap<String, String>,
+    type_names: &HashMap<String, String>,
+    field_names: &HashMap<String, String>,
+    mut out: W,
+) -> anyhow::Result<(HashMap<i32, String>, HashMap<String, String>)> {
+    // Reuse the recovered wire model. Revert the previous names before applying new hints.
+    let originals: HashMap<_, _> = previous_names
+        .iter()
+        .map(|(obf, name)| (name.as_str(), obf.as_str()))
+        .collect();
+    for item in type_to_item.values() {
+        if let ProtoItem::Message(message) = &mut *item.borrow_mut() {
+            for field in message.fields.iter_mut().chain(
+                message
+                    .oneofs
+                    .iter_mut()
+                    .flat_map(|oneof| &mut oneof.fields),
+            ) {
+                field.kind = rewrite_type_tokens(&field.kind, |name| {
+                    originals.get(name).copied().unwrap_or(name).to_owned()
+                });
+            }
+        }
+    }
+    let (cmd_ids, nt_map) = process_cmd_id(
+        type_to_item,
         &rsp_notify_map
             .iter()
             .map(|(c, cmd_id)| (c.format_type_name(true), *cmd_id))
@@ -796,11 +845,11 @@ pub fn generate_protobuf<W: Write>(
             .map(|(c, (cmd_id, deobf))| (c.format_type_name(true), (*cmd_id, deobf.clone())))
             .collect::<HashMap<_, _>>(),
         rsp_notify_names,
-        method_nt_map,
+        type_names,
     );
 
-    apply_global_field_map(&mut type_to_item, predeobf_map);
-    validate_output(&type_to_item)?;
+    apply_global_field_map(type_to_item, field_names);
+    validate_output(type_to_item)?;
 
     writeln!(
         out,
@@ -835,7 +884,7 @@ pub fn generate_protobuf<W: Write>(
         writeln!(out, "{}", proto.fmt_protobuf_with_depth(0))?;
     }
 
-    Ok((cmd_ids, nt_map, type_to_item))
+    Ok((cmd_ids, nt_map))
 }
 
 pub fn apply_global_field_map(type_to_item: &mut TypeToItemMap, map: &HashMap<String, String>) {

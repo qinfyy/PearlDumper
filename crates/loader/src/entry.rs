@@ -19,7 +19,7 @@ use windows::{
 fn run(module: *mut c_void) -> anyhow::Result<()> {
     unsafe {
         let _ = AllocConsole();
-        let _ = SetConsoleTitleW(w!("Castorice Dumper 4.6.51"));
+        let _ = SetConsoleTitleW(w!("Castorice Dumper"));
     }
     crate::logging::init()?;
     tracing::info!("Castorice Dumper: target 4.6.51");
