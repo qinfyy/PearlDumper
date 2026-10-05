@@ -1,3 +1,4 @@
+use crate::proto::recovery::Hints;
 use il2cpp::get_cached_class;
 use reflection::{method_info::MethodInfo, runtime_type::RuntimeType};
 use std::collections::HashMap;
@@ -50,9 +51,9 @@ fn clean_type_name(runtime_type: RuntimeType, il_name: &str) -> String {
 
 pub fn process_table(
     table: &[(&str, &str, &str, ExtractMode)],
-) -> (HashMap<String, Vec<String>>, HashMap<String, String>) {
+) -> (HashMap<String, Vec<String>>, Hints) {
     let mut method_map: HashMap<String, Vec<String>> = HashMap::new();
-    let mut proto_name_map: HashMap<String, String> = HashMap::new();
+    let mut proto_name_map = Hints::new();
 
     for (class_name, method_name, output_key, mode) in table {
         let Some(native_method) = get_method(class_name, method_name) else {
@@ -60,6 +61,7 @@ pub fn process_table(
             continue;
         };
         let rva = native_method.rva();
+        proto_name_map.context(format!("{class_name}::{method_name}"), rva);
 
         if let Ok(method_info) = MethodInfo::from_handle(native_method)
             && let Some(param_type) = get_param_type(&method_info, *mode)
@@ -67,19 +69,18 @@ pub fn process_table(
             let il_name = param_type.il_name();
             let clean = clean_type_name(param_type, &il_name);
             if clean.len() == 11 && clean.chars().all(char::is_uppercase) {
+                if rva != 0 {
+                    method_map
+                        .entry(clean.clone())
+                        .or_default()
+                        .push(format!("0x{rva:X}"));
+                }
                 proto_name_map.insert(clean, output_key.to_string());
             } else {
                 log::debug!(
                     "[Param NT] param name mismatch: {class_name}::{method_name} -> {output_key}, got \"{clean}\""
                 );
             }
-        }
-
-        if rva != 0 {
-            method_map
-                .entry(output_key.to_string())
-                .or_default()
-                .push(format!("0x{rva:X}"));
         }
     }
 

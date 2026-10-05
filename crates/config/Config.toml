@@ -1,0 +1,7 @@
+# 导出阶段按这里的顺序执行。
+# 可选值：proto、schema、excel、config、textmap、csharp、script、script_v2、metadata。
+# metadata 使用 morax 离线导出到 DUMP/Morax，不调用游戏元数据初始化器。
+# 运行时工作目录中的 Config.toml 会覆盖编译时内置的这份默认配置。
+
+[output]
+stages = ["proto", "schema", "excel"]

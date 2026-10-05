@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::proto::recovery::Hints;
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -8,17 +8,17 @@ use crate::proto::output::TypeToItemMap;
 
 pub mod handler;
 
-static CACHED_HANDLER_MAP: OnceLock<HashMap<String, String>> = OnceLock::new();
+static CACHED_HANDLER_MAP: OnceLock<Hints> = OnceLock::new();
 pub static CS_HANDLER_TABLE: OnceLock<Vec<(String, String, usize)>> = OnceLock::new();
 // pub static SC_HANDLER_TABLE: OnceLock<Vec<(String, String, usize)>> = OnceLock::new();
 
-pub fn get_handler_nt_map(type_to_item: &TypeToItemMap) -> anyhow::Result<HashMap<String, String>> {
+pub fn get_handler_nt_map(type_to_item: &TypeToItemMap) -> anyhow::Result<Hints> {
     if let Some(cached) = CACHED_HANDLER_MAP.get() {
         return Ok(cached.clone());
     }
 
-    let mut map = HashMap::new();
-    let steps: &[(&str, fn(&TypeToItemMap) -> HashMap<String, String>)] = &[
+    let mut map = Hints::new();
+    let steps: &[(&str, fn(&TypeToItemMap) -> Hints)] = &[
         (
             "avatar path equipment",
             handler::avatar_path_equipment::process,
@@ -42,8 +42,11 @@ pub fn get_handler_nt_map(type_to_item: &TypeToItemMap) -> anyhow::Result<HashMa
     for &(name, recover) in steps {
         let started = Instant::now();
         log::info!("[Handler NT] Starting {name}");
-        let entries = crate::guarded(|| Ok(recover(type_to_item)))
+        let mut entries = crate::guarded(|| Ok(recover(type_to_item)))
             .with_context(|| format!("packet handler field names: {name}"))?;
+        if name != "gate server" {
+            entries.advisory("legacy linear register/adjacency heuristic; requires independent scoped confirmation");
+        }
         log::info!(
             "[Handler NT] Finished {name}: {} names in {:.2}s",
             entries.len(),

@@ -1,3 +1,4 @@
+use crate::proto::recovery::Hints;
 use std::collections::HashMap;
 
 use crate::proto::output::{ProtoItem, TypeToItemMap};
@@ -7,16 +8,19 @@ use utils::scanner::game_assembly_function;
 
 use super::build_game_offset_map;
 
-pub fn process(type_to_item: &TypeToItemMap) -> HashMap<String, String> {
-    let mut map = HashMap::new();
+pub fn process(type_to_item: &TypeToItemMap) -> Hints {
+    let mut map = Hints::new();
 
-    let Some(method_nt_map) = crate::proto::method_nt::CACHED_NT_MAP.get() else {
-        return map;
-    };
-    let scene_battle_obf = method_nt_map
-        .iter()
-        .find_map(|(obf, deobf)| (deobf == "SceneBattleInfo").then(|| obf.clone()));
-    let Some(scene_battle_obf) = scene_battle_obf else {
+    let candidates: Vec<_> = type_to_item
+        .values()
+        .filter_map(|item| match &*item.borrow() {
+            ProtoItem::Message(m) if m.deobfuscated_name.as_deref() == Some("SceneBattleInfo") => {
+                Some(m.name.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    let [scene_battle_obf] = candidates.as_slice() else {
         return map;
     };
 
@@ -53,7 +57,12 @@ pub fn process(type_to_item: &TypeToItemMap) -> HashMap<String, String> {
             ProtoItem::Message(m) => Some(
                 m.fields
                     .iter()
-                    .map(|f| (f.offset as usize, f.name.clone()))
+                    .map(|f| {
+                        (
+                            f.offset as usize,
+                            crate::proto::recovery::field_key(&m.name, f.number),
+                        )
+                    })
                     .collect(),
             ),
             _ => None,
@@ -64,6 +73,7 @@ pub fn process(type_to_item: &TypeToItemMap) -> HashMap<String, String> {
         return map;
     };
     let ip = (*il2cpp::GA_BASE + rva) as u64;
+    map.context(module_path!(), rva);
 
     let mut decoder = Decoder::with_ip(64, data, ip, DecoderOptions::NONE);
     let mut insn = Instruction::default();

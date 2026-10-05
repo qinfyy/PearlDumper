@@ -13,12 +13,16 @@ base64 = { workspace = true, optional = true }
 byteorder.workspace = true
 convert_case.workspace = true
 dahlah-derive.workspace = true
+castorice-config.workspace = true
 iced-x86.workspace = true
 il2cpp.workspace = true
 ilhook.workspace = true
 indexmap.workspace = true
 log.workspace = true
 microseh.workspace = true
+morax.workspace = true
+protox.workspace = true
+sha2.workspace = true
 reflection.workspace = true
 serde.workspace = true
 serde_json.workspace = true

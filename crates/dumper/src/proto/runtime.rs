@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use anyhow::{Context, ensure};
 use il2cpp::{
@@ -283,7 +283,7 @@ impl ProtocolRuntime {
         self.known_methods.get(&pointer).copied()
     }
 
-    pub fn xlua_method_names(&mut self) -> anyhow::Result<HashMap<usize, String>> {
+    pub fn xlua_method_names(&mut self) -> anyhow::Result<HashMap<usize, BTreeSet<String>>> {
         let binding = &self.profile.xlua;
         let class = get_cached_class(&binding.class).context("XLua translator class is missing")?;
         let fields_class = get_cached_class(&binding.fields_class)
@@ -346,15 +346,13 @@ impl ProtocolRuntime {
                 continue;
             }
             let obfuscated = method.get_name().into_owned();
-            if let Some(previous) = names.insert(obfuscated.clone(), name.clone()) {
-                ensure!(
-                    previous == *name,
-                    "ambiguous XLua request name for {obfuscated}: {previous} / {name}"
-                );
-            }
+            names
+                .entry(obfuscated)
+                .or_insert_with(BTreeSet::new)
+                .insert(name.clone());
         }
 
-        let mut native_names: HashMap<usize, HashSet<String>> = HashMap::new();
+        let mut native_names: HashMap<usize, BTreeSet<String>> = HashMap::new();
         let methods = il2cpp::FUNCTIONS_TABLE
             .get()
             .context("method cache is missing")?;
@@ -378,23 +376,10 @@ impl ProtocolRuntime {
                 native_names
                     .entry(address)
                     .or_default()
-                    .insert(name.clone());
+                    .extend(name.iter().cloned());
             }
         }
-        let result: HashMap<usize, String> = native_names
-            .into_iter()
-            .filter_map(|(address, names)| {
-                if names.len() == 1 {
-                    Some((address, names.into_iter().next().unwrap()))
-                } else {
-                    log::debug!(
-                        "Shared request body at RVA 0x{:X} has multiple XLua names: {names:?}",
-                        address - *il2cpp::GA_BASE
-                    );
-                    None
-                }
-            })
-            .collect();
+        let result = native_names;
         log::info!(
             "XLua: {} delegate bindings, {} request names, {} native methods",
             fields.len(),

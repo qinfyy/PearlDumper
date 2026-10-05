@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 pub mod avatar;
@@ -28,9 +28,10 @@ pub enum FieldLogic {
 
 pub fn deobf_fields(
     items: &[Rc<RefCell<ProtoItem>>],
-    nt_map: &mut indexmap::IndexMap<String, String>,
-    global_field_map: &mut HashMap<String, String>,
-) {
+    type_names: &HashMap<String, String>,
+    known_fields: &HashMap<String, String>,
+) -> crate::proto::recovery::Hints {
+    use crate::proto::recovery::{Evidence, Hints, candidate, field_key};
     let field_configs = [
         challenge_boss_relic_info::CHALLENGE_BOSS_RELIC_INFO_FIELD_MAP,
         chat_data::CHATDATA_FIELD_MAP,
@@ -50,98 +51,77 @@ pub fn deobf_fields(
         scene_info::SCENE_INFO_FIELD_MAP,
     ];
 
-    loop {
-        let prev_map_size = global_field_map.len();
-
-        for item in items {
-            let item_ref = item.borrow();
-            if let ProtoItem::Message(m) = &*item_ref {
-                let Some(deobf_msg_name) = nt_map.get(&m.name) else {
-                    continue;
-                };
-
-                let logic = field_configs
-                    .iter()
-                    .flat_map(|maps| maps.iter())
-                    .find(|(name, _)| *name == deobf_msg_name)
-                    .map(|(_, l)| l);
-
-                if let Some(logic) = logic {
-                    match logic {
-                        FieldLogic::ByNumber(mappings) => {
-                            for field in &m.fields {
-                                if let Some((_, deobf_f)) = mappings.iter().find(|(n, _)| {
-                                    *n == field.number
-                                        && !global_field_map.contains_key(&field.name)
-                                }) {
-                                    let deobf_name = deobf_f.to_string();
-                                    global_field_map.insert(field.name.clone(), deobf_name.clone());
-                                    nt_map.insert(field.name.clone(), deobf_name);
-                                }
-                            }
+    let mut hints = Hints::new();
+    for item in items {
+        let borrowed = item.borrow();
+        let ProtoItem::Message(m) = &*borrowed else {
+            continue;
+        };
+        let Some(name) = type_names.get(&m.name) else {
+            continue;
+        };
+        let fields: Vec<_> = m
+            .fields
+            .iter()
+            .chain(m.oneofs.iter().flat_map(|o| &o.fields))
+            .collect();
+        for (_, logic) in field_configs
+            .iter()
+            .flat_map(|c| c.iter())
+            .filter(|(n, _)| *n == name)
+        {
+            match logic {
+                FieldLogic::ByNumber(mappings) => {
+                    // Numbers alone are not stable semantic identities across versions.
+                    let valid = mappings.iter().all(|(n, expected)| {
+                        fields.iter().any(|f| f.number == *n)
+                            && known_fields
+                                .get(&field_key(&m.name, *n))
+                                .is_some_and(|v| v == expected)
+                    });
+                    for (n, expected) in *mappings {
+                        if fields.iter().any(|f| f.number == *n) {
+                            hints.entries.push(candidate(
+                                &field_key(&m.name, *n),
+                                expected,
+                                "number rule: requires scoped structure/name confirmation",
+                                if valid {
+                                    Evidence::Structural
+                                } else {
+                                    Evidence::Hint
+                                },
+                            ));
                         }
-                        FieldLogic::ByWireType(mappings) => {
-                            let mut unsolved_fields: Vec<_> = m.fields.iter().collect();
-                            let mut unused_mappings: Vec<_> = mappings.iter().collect();
-
-                            unsolved_fields.retain(|f| {
-                                if let Some(deobf_name) = global_field_map.get(&f.name) {
-                                    let kind = deobf_kind(&f.kind, nt_map);
-                                    if let Some(pos) = unused_mappings
-                                        .iter()
-                                        .position(|(wt, dn)| *wt == kind && *dn == deobf_name)
-                                    {
-                                        unused_mappings.remove(pos);
-                                        if !nt_map.contains_key(&f.name) {
-                                            nt_map.insert(f.name.clone(), deobf_name.clone());
-                                        }
-                                    }
-                                    return false;
-                                }
-                                true
-                            });
-
-                            let wire_types: HashSet<_> =
-                                unused_mappings.iter().map(|(wt, _)| *wt).collect();
-
-                            for wt in wire_types {
-                                let fields_of_type: Vec<_> = unsolved_fields
-                                    .iter()
-                                    .filter(|f| deobf_kind(&f.kind, nt_map) == wt)
-                                    .collect();
-                                let names_of_type: Vec<_> = unused_mappings
-                                    .iter()
-                                    .filter(|(mwt, _)| *mwt == wt)
-                                    .collect();
-
-                                if fields_of_type.len() == names_of_type.len()
-                                    && !fields_of_type.is_empty()
-                                {
-                                    for (f, (_, deobf_name)) in
-                                        fields_of_type.iter().zip(names_of_type)
-                                    {
-                                        let deobf_s = deobf_name.to_string();
-                                        global_field_map.insert(f.name.clone(), deobf_s.clone());
-                                        nt_map.insert(f.name.clone(), deobf_s);
-                                    }
-                                }
-                            }
+                    }
+                }
+                FieldLogic::ByWireType(mappings) => {
+                    for (kind, expected) in *mappings {
+                        let matches: Vec<_> = fields
+                            .iter()
+                            .filter(|f| {
+                                crate::proto::output::rewrite_type_tokens(&f.kind, |s| {
+                                    type_names.get(s).cloned().unwrap_or_else(|| s.into())
+                                }) == *kind
+                            })
+                            .collect();
+                        let unique = matches.len() == 1
+                            && mappings.iter().filter(|(k, _)| k == kind).count() == 1;
+                        for f in matches {
+                            hints.entries.push(candidate(
+                                &field_key(&m.name, f.number),
+                                expected,
+                                "scoped semantic wire-type rule",
+                                if unique {
+                                    Evidence::Structural
+                                } else {
+                                    Evidence::Hint
+                                },
+                            ));
                         }
                     }
                 }
             }
         }
-
-        if global_field_map.len() == prev_map_size {
-            break;
-        }
     }
-
-    scene_info::full_deobf_scene_info(items, nt_map, global_field_map);
-}
-
-fn deobf_kind(kind: &str, nt_map: &indexmap::IndexMap<String, String>) -> String {
-    crate::proto::output::rewrite_type_tokens(kind, |name| {
-        nt_map.get(name).cloned().unwrap_or_else(|| name.to_owned())
-    })
+    hints
 }

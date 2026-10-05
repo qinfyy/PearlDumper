@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use crate::proto::recovery::Hints;
 
 use il2cpp::vm::value::Il2CppValue;
 use reflection::{attributes::MethodAttributes, runtime_type::RuntimeType};
 
-pub fn get_scene_prop_info_nt() -> HashMap<String, String> {
-    let mut map = HashMap::new();
+pub fn get_scene_prop_info_nt() -> Hints {
+    let mut map = Hints::new();
 
     let Some(prop_def) = il2cpp::get_cached_class("RPG.Client.MapPropDef")
         .and_then(|c| RuntimeType::from_class(c).ok())
@@ -35,8 +35,8 @@ pub fn get_scene_prop_info_nt() -> HashMap<String, String> {
     map
 }
 
-pub fn get_maze_prop_state_nt() -> HashMap<String, String> {
-    let mut map = HashMap::new();
+pub fn get_maze_prop_state_nt() -> Hints {
+    let mut map = Hints::new();
 
     let strategy_type = il2cpp::get_cached_class("RPG.Client.NavMap.MapData")
         .and_then(|c| RuntimeType::from_class(c).ok())
@@ -74,8 +74,8 @@ pub fn get_maze_prop_state_nt() -> HashMap<String, String> {
     map
 }
 
-pub fn get_scene_monster_wave_nt() -> HashMap<String, String> {
-    let mut map = HashMap::new();
+pub fn get_scene_monster_wave_nt() -> Hints {
+    let mut map = Hints::new();
 
     let monster_reward_type = il2cpp::get_cached_class("RPG.GameCore.LineUpContext")
         .and_then(|c| RuntimeType::from_class(c).ok())

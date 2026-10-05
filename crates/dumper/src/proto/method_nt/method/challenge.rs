@@ -1,11 +1,11 @@
+use crate::proto::recovery::Hints;
 use reflection::attributes::MethodAttributes;
-use std::collections::HashMap;
 
 use il2cpp::vm::value::Il2CppValue;
 use reflection::runtime_type::RuntimeType;
 
-pub fn get_challenge_history_nt() -> HashMap<String, String> {
-    let mut map = HashMap::new();
+pub fn get_challenge_history_nt() -> Hints {
+    let mut map = Hints::new();
 
     let history_type = il2cpp::get_cached_class("RPG.Client.ChallengeModule")
         .and_then(|c| RuntimeType::from_class(c).ok())
@@ -43,12 +43,12 @@ pub fn get_challenge_history_nt() -> HashMap<String, String> {
     map
 }
 
-pub fn get_challengepeak_nt() -> HashMap<String, String> {
+pub fn get_challengepeak_nt() -> Hints {
     super::get_callback_parameter_nt(&[("<_GetPeakData", "ChallengePeak")])
 }
 
-pub fn get_challenge_peak_group_nt() -> HashMap<String, String> {
-    let mut map = HashMap::new();
+pub fn get_challenge_peak_group_nt() -> Hints {
+    let mut map = Hints::new();
 
     let server_agent_type = il2cpp::get_cached_class("RPG.Client.ChallengePeakModule")
         .and_then(|c| RuntimeType::from_class(c).ok())
@@ -82,8 +82,8 @@ pub fn get_challenge_peak_group_nt() -> HashMap<String, String> {
     map
 }
 
-pub fn get_cur_tierce_challenge_nt() -> HashMap<String, String> {
-    let mut map = HashMap::new();
+pub fn get_cur_tierce_challenge_nt() -> Hints {
+    let mut map = Hints::new();
 
     let repo_type = il2cpp::get_cached_class(
         "RPG.Client.Challenge.Tierce.ChallengeTierceStageSelectViewModel.Factory",
@@ -119,7 +119,6 @@ pub fn get_cur_tierce_challenge_nt() -> HashMap<String, String> {
             {
                 log::debug!("[Method NT] param nt: {n0} -> CurTierceChallenge");
                 map.insert(n0.into_owned(), "CurTierceChallenge".to_string());
-                break;
             }
         }
     }
@@ -130,8 +129,8 @@ pub fn get_cur_tierce_challenge_nt() -> HashMap<String, String> {
     map
 }
 
-pub fn get_challenge_tierce_handler_nt() -> HashMap<String, String> {
-    let mut map = HashMap::new();
+pub fn get_challenge_tierce_handler_nt() -> Hints {
+    let mut map = Hints::new();
 
     let classes = il2cpp::CLASS_TABLE_VEC.get().expect("missing class cache");
     let handler_class = classes[unsafe { il2cpp::ASSEMBLY_CSHARP_START } as usize..]
@@ -176,7 +175,6 @@ pub fn get_challenge_tierce_handler_nt() -> HashMap<String, String> {
 
             if obf_name.len() == 11
                 && obf_name.chars().all(char::is_uppercase)
-                && !map.contains_key(obf_name.as_ref())
                 && let Some(deobf_name) = m_name_str
                     .strip_prefix('<')
                     .and_then(|m| m.split('>').next())

@@ -1,3 +1,4 @@
+use crate::proto::recovery::Hints;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -10,14 +11,14 @@ pub fn set_proto_fields(fields: HashMap<u32, String>) {
     let _ = PROTO_FIELDS.set(fields);
 }
 
-pub fn run() -> HashMap<String, String> {
-    let mut map = HashMap::new();
+pub fn run() -> Hints {
+    let mut map = Hints::new();
 
     let version = &*GAME_VERSION;
     let seed = &*dispatch::DISPATCH_SEED;
 
     let Some(dispatch_url) = dispatch::get_dispatch_url() else {
-        return HashMap::new();
+        return Hints::new();
     };
     let full_dispatch_url = format!(
         "{dispatch_url}?version={version}&language_type=3&platform_type=3&channel_id=1&sub_channel_id=1&is_new_format=1"
@@ -25,7 +26,7 @@ pub fn run() -> HashMap<String, String> {
     log::debug!("[Gateway] dispatch_url = {full_dispatch_url}");
 
     let Some(gateway_url) = dispatch::fetch_gateway_url(&dispatch_url, version) else {
-        return HashMap::new();
+        return Hints::new();
     };
 
     let full_gateway_url = format!(
@@ -34,7 +35,7 @@ pub fn run() -> HashMap<String, String> {
     log::debug!("[Gateway] gateway_url = {full_gateway_url}");
 
     let Some(result) = dispatch::fetch_gateway_response(&gateway_url, version, seed) else {
-        return HashMap::new();
+        return Hints::new();
     };
 
     let proto_fields = PROTO_FIELDS.get();

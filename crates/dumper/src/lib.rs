@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::Context;
+use castorice_config::{Config, OutputKind};
 use serde::Serialize;
 
 mod csharp;
@@ -28,6 +29,25 @@ enum Stage {
     Csharp,
     Script,
     ScriptV2,
+    Metadata,
+}
+
+impl TryFrom<OutputKind> for Stage {
+    type Error = anyhow::Error;
+
+    fn try_from(kind: OutputKind) -> Result<Self, Self::Error> {
+        Ok(match kind {
+            OutputKind::Proto => Self::Proto,
+            OutputKind::Schema => Self::Schema,
+            OutputKind::Excel => Self::Excel,
+            OutputKind::Config => Self::Config,
+            OutputKind::Textmap => Self::Textmap,
+            OutputKind::Csharp => Self::Csharp,
+            OutputKind::Script => Self::Script,
+            OutputKind::ScriptV2 => Self::ScriptV2,
+            OutputKind::Metadata => Self::Metadata,
+        })
+    }
 }
 
 impl Stage {
@@ -41,6 +61,7 @@ impl Stage {
             Self::Csharp => "csharp",
             Self::Script => "script",
             Self::ScriptV2 => "script_v2",
+            Self::Metadata => "metadata",
         }
     }
 }
@@ -61,6 +82,7 @@ fn parse_stages(value: &str) -> anyhow::Result<Vec<Stage>> {
             "csharp" => Stage::Csharp,
             "script" => Stage::Script,
             "script_v2" => Stage::ScriptV2,
+            "metadata" => Stage::Metadata,
             _ => anyhow::bail!("unknown dump stage {name}"),
         };
         if !stages.contains(&stage) {
@@ -124,9 +146,27 @@ impl DumpReport {
 
 pub fn run() -> anyhow::Result<()> {
     // Validate all options before making the first call into the game.
-    let selection = std::env::var("CASTORICE_DUMP").unwrap_or_else(|_| "proto,schema,excel".into());
-    let stages = parse_stages(&selection)?;
-    log::info!("Selected dump stages: {selection}");
+    let config = Config::load()?;
+    let stages = if let Ok(selection) = std::env::var("CASTORICE_DUMP") {
+        log::info!("Using CASTORICE_DUMP override: {selection}");
+        parse_stages(&selection)?
+    } else {
+        config
+            .output
+            .stages
+            .iter()
+            .copied()
+            .map(Stage::try_from)
+            .collect::<anyhow::Result<Vec<_>>>()?
+    };
+    log::info!(
+        "Selected dump stages: {}",
+        stages
+            .iter()
+            .map(|stage| stage.name())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
     ensure_output_directory()?;
     let mut report = DumpReport {
         client_version: il2cpp::profile::supported()?.version.clone(),
@@ -139,7 +179,12 @@ pub fn run() -> anyhow::Result<()> {
             })
             .collect(),
     };
-    report.execute(0, runtime::init_default)?;
+    if stages.iter().any(|stage| *stage != Stage::Metadata) {
+        report.execute(0, runtime::init_default)?;
+    } else {
+        report.stages[0].status = "not_required";
+        report.save()?;
+    }
     for (index, stage) in stages.into_iter().enumerate() {
         report.execute(index + 1, || run_stage(stage))?;
     }
@@ -149,21 +194,31 @@ pub fn run() -> anyhow::Result<()> {
 fn run_stage(stage: Stage) -> anyhow::Result<()> {
     match stage {
         Stage::Proto => {
-            let mut proto = BufWriter::new(File::create("DUMP/StarRail.proto.partial")?);
-            let mut packet_ids = BufWriter::new(File::create("DUMP/packetIds.json.partial")?);
-            proto::dump(
-                &mut proto,
-                &mut packet_ids,
-                proto::ProtoDumpMode::NativeGetters,
-                false,
-            )?;
-            proto.flush()?;
-            packet_ids.flush()?;
-            proto.get_ref().sync_all()?;
-            packet_ids.get_ref().sync_all()?;
-            drop((proto, packet_ids));
-            std::fs::rename("DUMP/StarRail.proto.partial", "DUMP/StarRail.proto")?;
-            std::fs::rename("DUMP/packetIds.json.partial", "DUMP/packetIds.json")?;
+            let result = (|| -> anyhow::Result<()> {
+                let mut proto = BufWriter::new(File::create("DUMP/StarRail.proto.partial")?);
+                let mut packet_ids = BufWriter::new(File::create("DUMP/packetIds.json.partial")?);
+                proto::dump(
+                    &mut proto,
+                    &mut packet_ids,
+                    proto::ProtoDumpMode::NativeGetters,
+                    false,
+                )?;
+                proto.flush()?;
+                packet_ids.flush()?;
+                proto.get_ref().sync_all()?;
+                packet_ids.get_ref().sync_all()?;
+                drop((proto, packet_ids));
+                std::fs::rename("DUMP/StarRail.proto.partial", "DUMP/StarRail.proto")?;
+                std::fs::rename("DUMP/packetIds.json.partial", "DUMP/packetIds.json")?;
+                proto::recovery::publish()?;
+                Ok(())
+            })();
+            if let Err(error) = &result {
+                if let Err(report_error) = proto::recovery::record_failure(error) {
+                    log::error!("Cannot record NT publication failure: {report_error:#}");
+                }
+            }
+            result?;
         }
         Stage::Schema => parser_data::dump()?,
         Stage::Excel => res::dump_excel()?,
@@ -172,6 +227,17 @@ fn run_stage(stage: Stage) -> anyhow::Result<()> {
         Stage::Csharp => csharp::dump(false)?,
         Stage::Script => script::dump()?,
         Stage::ScriptV2 => script_v2::dump()?,
+        Stage::Metadata => {
+            let (assembly, _) = il2cpp::profile::loaded_module_path("GameAssembly.dll")?;
+            let game_dir = assembly
+                .parent()
+                .context("GameAssembly.dll has no parent directory")?;
+            log::info!(
+                "Exporting original metadata from {} to DUMP/Morax",
+                game_dir.display()
+            );
+            morax::export::export_game(game_dir, std::path::Path::new("DUMP/Morax"))?;
+        }
     }
     Ok(())
 }

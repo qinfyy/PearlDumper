@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use crate::proto::recovery::Hints;
+use std::collections::HashSet;
 use std::time::Instant;
 
 use anyhow::Context;
@@ -11,20 +12,21 @@ pub mod challenge;
 pub mod nt_expected;
 pub mod scene;
 
-pub(super) fn get_callback_parameter_nt(mapping: &[(&str, &str)]) -> HashMap<String, String> {
-    let mut map = HashMap::new();
+pub(super) fn get_callback_parameter_nt(mapping: &[(&str, &str)]) -> Hints {
+    let mut map = Hints::new();
     // Filter cached native names before allocating any reflection objects. All
     // callback patterns share this pass instead of rescanning every client type.
     for (signature, &method) in il2cpp::FUNCTIONS_TABLE.get().expect("missing method cache") {
         let Some((_, name)) = signature.rsplit_once("::") else {
             continue;
         };
-        let Some(deobfuscated) = mapping
+        let deobfuscated: Vec<_> = mapping
             .iter()
-            .find_map(|(pattern, name_out)| name.contains(pattern).then_some(*name_out))
-        else {
+            .filter_map(|(pattern, name_out)| name.contains(pattern).then_some(*name_out))
+            .collect();
+        if deobfuscated.is_empty() {
             continue;
-        };
+        }
         if method.class().get_image().get_name() != "Assembly-CSharp.dll"
             || il2cpp::api::il2cpp_method_get_param_count(method) == 0
         {
@@ -37,8 +39,10 @@ pub(super) fn get_callback_parameter_nt(mapping: &[(&str, &str)]) -> HashMap<Str
         }
         let obfuscated = ty.il_name();
         if obfuscated.len() == 11 && obfuscated.chars().all(char::is_uppercase) {
-            log::debug!("[Method NT] param nt: {obfuscated} -> {deobfuscated}");
-            map.insert(obfuscated.into_owned(), deobfuscated.to_owned());
+            map.context(signature.clone(), method.checked_rva().unwrap_or(0));
+            for name in deobfuscated {
+                map.insert(obfuscated.to_string(), name.to_owned());
+            }
         }
     }
     map
@@ -48,8 +52,8 @@ pub(super) fn non_null_type(result: anyhow::Result<RuntimeType>) -> Option<Runti
     result.ok().filter(|ty| !ty.is_null())
 }
 
-pub fn get_method_nt_entries() -> anyhow::Result<HashMap<String, String>> {
-    let steps: &[(&str, fn() -> HashMap<String, String>)] = &[
+pub fn get_method_nt_entries() -> anyhow::Result<Hints> {
+    let steps: &[(&str, fn() -> Hints)] = &[
         ("avatar types", avatar::get_avatar_nt),
         ("avatar callbacks", avatar::get_avatar_response_nt),
         ("challenge history", challenge::get_challenge_history_nt),
@@ -80,12 +84,24 @@ pub fn get_method_nt_entries() -> anyhow::Result<HashMap<String, String>> {
         ("maze prop state", scene::get_maze_prop_state_nt),
         ("scene monster waves", scene::get_scene_monster_wave_nt),
     ];
-    let mut map = HashMap::new();
+    let mut map = Hints::new();
     for &(name, recover) in steps {
         let started = Instant::now();
         log::info!("[Method NT] Starting {name}");
-        let entries = crate::guarded(|| Ok(recover()))
+        let mut entries = crate::guarded(|| Ok(recover()))
             .with_context(|| format!("method name recovery: {name}"))?;
+        if matches!(
+            name,
+            "avatar types"
+                | "challenge history"
+                | "challenge peak group"
+                | "current tierce challenge"
+                | "grid fight statistics"
+                | "scene props"
+                | "maze prop state"
+        ) {
+            entries.advisory("legacy signature/count heuristic; requires independent identity");
+        }
         log::info!(
             "[Method NT] Finished {name}: {} names in {:.2}s",
             entries.len(),

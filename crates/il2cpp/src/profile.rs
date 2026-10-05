@@ -54,7 +54,7 @@ pub fn validate_loaded_client() -> anyhow::Result<&'static ClientProfile> {
     Ok(profile)
 }
 
-fn loaded_module_path(name: &str) -> anyhow::Result<(PathBuf, usize)> {
+pub fn loaded_module_path(name: &str) -> anyhow::Result<(PathBuf, usize)> {
     let wide = HSTRING::from(name);
     let module = unsafe { GetModuleHandleW(PCWSTR(wide.as_ptr())) }?;
     let mut buffer = vec![0u16; 32768];

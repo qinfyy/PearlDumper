@@ -101,3 +101,17 @@ pub unsafe fn read<T: Copy>(address: usize) -> anyhow::Result<T> {
     microseh::try_seh(|| unsafe { std::ptr::read_unaligned(address as *const T) })
         .map_err(|error| anyhow::anyhow!("cannot read 0x{address:X}: {error:?}"))
 }
+
+// Safety: the target must keep the entire range alive during the copy.
+pub unsafe fn read_bytes(address: usize, size: usize) -> anyhow::Result<Vec<u8>> {
+    anyhow::ensure!(
+        is_readable(address, size),
+        "unreadable range 0x{address:X}+0x{size:X}"
+    );
+    let mut bytes = vec![0; size];
+    microseh::try_seh(|| unsafe {
+        std::ptr::copy_nonoverlapping(address as *const u8, bytes.as_mut_ptr(), size);
+    })
+    .map_err(|error| anyhow::anyhow!("cannot copy 0x{address:X}+0x{size:X}: {error:?}"))?;
+    Ok(bytes)
+}

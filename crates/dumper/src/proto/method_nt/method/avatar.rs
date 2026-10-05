@@ -1,4 +1,5 @@
-use std::{borrow::Cow, collections::HashMap, sync::LazyLock};
+use crate::proto::recovery::Hints;
+use std::{borrow::Cow, sync::LazyLock};
 
 use reflection::runtime_type::RuntimeType;
 
@@ -36,8 +37,8 @@ pub static AVATAR_HANDLER_CLASS: LazyLock<Cow<'static, str>> = LazyLock::new(|| 
     panic!("unresolved client layout; see preceding log entry");
 });
 
-pub fn get_avatar_nt() -> HashMap<String, String> {
-    let mut map = HashMap::new();
+pub fn get_avatar_nt() -> Hints {
+    let mut map = Hints::new();
     let handler_class_name = &*AVATAR_HANDLER_CLASS;
     let Some(class) = il2cpp::get_cached_class(handler_class_name) else {
         return map;
@@ -62,10 +63,7 @@ pub fn get_avatar_nt() -> HashMap<String, String> {
             && let Some(p2_type) = super::non_null_type(params[1].get_parameter_type())
         {
             let obf_name = p2_type.il_name().into_owned();
-            if obf_name.len() == 11
-                && obf_name.chars().all(char::is_uppercase)
-                && !map.contains_key(&obf_name)
-            {
+            if obf_name.len() == 11 && obf_name.chars().all(char::is_uppercase) {
                 log::debug!("[Method NT] param nt: {obf_name} -> Avatar");
                 map.insert(obf_name, "Avatar".to_string());
             }
@@ -77,7 +75,7 @@ pub fn get_avatar_nt() -> HashMap<String, String> {
     map
 }
 
-pub fn get_avatar_response_nt() -> HashMap<String, String> {
+pub fn get_avatar_response_nt() -> Hints {
     super::get_callback_parameter_nt(&[
         ("<LevelUpAvatar", "AvatarExpUpScRsp"),
         ("<UnlockTraceNode", "UnlockSkilltreeScRsp"),

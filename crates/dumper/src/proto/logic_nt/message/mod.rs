@@ -20,72 +20,72 @@ pub mod scene_entity_info;
 
 use self::message_type::{CATEGORIES, Category};
 use super::super::output::{ProtoItem, short_name};
+use crate::proto::recovery::Hints;
 
 pub fn deobf_messages(
     items: &[Rc<RefCell<ProtoItem>>],
     method_nt_map: &HashMap<String, String>,
-    nt_map: &mut indexmap::IndexMap<String, String>,
-) {
+) -> Hints {
+    let mut nt_map = Hints::new();
     let mut current_cat: Option<&Category> = None;
     let mut pending_enums = Vec::new();
     let mut pending_items = Vec::new();
 
-    let flush_category =
-        |cat: &Category,
-         enums: &mut Vec<String>,
-         p_items: &mut Vec<Rc<RefCell<ProtoItem>>>,
-         nt_map: &mut indexmap::IndexMap<String, String>| {
-            if enums.len() == cat.enums.len() {
-                for (idx, obf_name) in enums.iter().enumerate() {
-                    if cat.enums[idx] != "Obf" {
-                        nt_map
-                            .entry(obf_name.clone())
-                            .or_insert_with(|| cat.enums[idx].to_string());
-                    }
+    let flush_category = |cat: &Category,
+                          enums: &mut Vec<String>,
+                          p_items: &mut Vec<Rc<RefCell<ProtoItem>>>,
+                          nt_map: &mut Hints| {
+        nt_map.context(
+            format!("legacy category {}..{}", cat.trigger, cat.target),
+            0,
+        );
+        if enums.len() == cat.enums.len() {
+            for (idx, obf_name) in enums.iter().enumerate() {
+                if cat.enums[idx] != "Obf" {
+                    nt_map.insert(obf_name.clone(), cat.enums[idx].to_string());
                 }
-            } else {
-                log::debug!(
-                    "[logic_nt] category trigger={} enums mismatch: expected {} got {} ({} → {})",
-                    cat.trigger,
-                    cat.enums.len(),
-                    enums.len(),
-                    cat.enums.join(", "),
-                    enums.join(", "),
-                );
             }
-            if p_items.len() == cat.messages.len() {
-                for (idx, item) in p_items.iter().enumerate() {
-                    let item_ref = item.borrow();
-                    let obf_name = match &*item_ref {
-                        ProtoItem::Message(m) => &m.name,
-                        ProtoItem::Enum(e) => &e.name,
-                    };
-                    if cat.messages[idx] != "Obf" {
-                        nt_map
-                            .entry(obf_name.clone())
-                            .or_insert_with(|| cat.messages[idx].to_string());
-                    }
+        } else {
+            log::debug!(
+                "[logic_nt] category trigger={} enums mismatch: expected {} got {} ({} → {})",
+                cat.trigger,
+                cat.enums.len(),
+                enums.len(),
+                cat.enums.join(", "),
+                enums.join(", "),
+            );
+        }
+        if p_items.len() == cat.messages.len() {
+            for (idx, item) in p_items.iter().enumerate() {
+                let item_ref = item.borrow();
+                let obf_name = match &*item_ref {
+                    ProtoItem::Message(m) => &m.name,
+                    ProtoItem::Enum(e) => &e.name,
+                };
+                if cat.messages[idx] != "Obf" {
+                    nt_map.insert(obf_name.clone(), cat.messages[idx].to_string());
                 }
-            } else {
-                log::debug!(
-                    "[logic_nt] category trigger={} messages mismatch: expected {} got {} ({} → {})",
-                    cat.trigger,
-                    cat.messages.len(),
-                    p_items.len(),
-                    cat.messages.join(", "),
-                    p_items
-                        .iter()
-                        .map(|i| match &*i.borrow() {
-                            ProtoItem::Message(m) => m.name.clone(),
-                            ProtoItem::Enum(e) => e.name.clone(),
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                );
             }
-            enums.clear();
-            p_items.clear();
-        };
+        } else {
+            log::debug!(
+                "[logic_nt] category trigger={} messages mismatch: expected {} got {} ({} → {})",
+                cat.trigger,
+                cat.messages.len(),
+                p_items.len(),
+                cat.messages.join(", "),
+                p_items
+                    .iter()
+                    .map(|i| match &*i.borrow() {
+                        ProtoItem::Message(m) => m.name.clone(),
+                        ProtoItem::Enum(e) => e.name.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+        enums.clear();
+        p_items.clear();
+    };
 
     for item in items {
         let item_ref = item.borrow();
@@ -102,19 +102,13 @@ pub fn deobf_messages(
 
         // An anchor can close one category and open the next, such as AvatarProperty.
         if let Some(cat) = current_cat.filter(|c| short_deobf == Some(c.target)) {
-            if let Some(dn) = deobf_name.as_ref() {
-                nt_map.insert(name.clone(), dn.clone());
-            }
-            flush_category(cat, &mut pending_enums, &mut pending_items, nt_map);
+            flush_category(cat, &mut pending_enums, &mut pending_items, &mut nt_map);
             current_cat = None;
         }
 
         if let Some(next_cat) =
             short_deobf.and_then(|sd| CATEGORIES.iter().find(|c| c.trigger == sd))
         {
-            if let Some(dn) = deobf_name.as_ref() {
-                nt_map.insert(name.clone(), dn.clone());
-            }
             if let Some(prev_cat) = current_cat {
                 // A missing end anchor must not turn unrelated types into this category.
                 log::debug!(
@@ -144,15 +138,18 @@ pub fn deobf_messages(
             cat.trigger
         );
     }
-    recover_chat_messages(items, nt_map);
+    recover_chat_messages(items, method_nt_map, &mut nt_map);
+    nt_map.advisory("legacy category/number rule; requires independent identity");
+    nt_map
 }
 
 fn recover_chat_messages(
     items: &[Rc<RefCell<ProtoItem>>],
-    nt_map: &mut indexmap::IndexMap<String, String>,
+    known: &HashMap<String, String>,
+    nt_map: &mut Hints,
 ) {
     let resolve = |kind: &str| {
-        nt_map
+        known
             .get(kind)
             .map(String::as_str)
             .unwrap_or(kind)
@@ -220,8 +217,7 @@ fn recover_chat_messages(
         (contact, "ContactIdentity"),
         (chat_message, "ChatMessageData"),
     ] {
-        nt_map
-            .entry(obfuscated.clone())
-            .or_insert_with(|| name.to_owned());
+        nt_map.context("legacy chat field-number chain", 0);
+        nt_map.insert(obfuscated.clone(), name.to_owned());
     }
 }

@@ -1,3 +1,4 @@
+use crate::proto::recovery::Hints;
 #[cfg(feature = "gateway-network")]
 pub mod decode_gateway;
 pub mod decoder;
@@ -13,7 +14,7 @@ use iced_x86::Register;
 
 use crate::proto::output::TypeToItemMap;
 
-pub fn process_all(type_to_item: &TypeToItemMap) -> HashMap<String, String> {
+pub fn process_all(type_to_item: &TypeToItemMap) -> Hints {
     let mut map = parse_gate_server::process(type_to_item);
     map.extend(stop_info::process_stop_info(type_to_item));
     #[cfg(feature = "gateway-network")]
@@ -22,6 +23,134 @@ pub fn process_all(type_to_item: &TypeToItemMap) -> HashMap<String, String> {
         map.extend(decode_nt);
     }
     map
+}
+
+fn recover_parser(items: &TypeToItemMap, method_name: &str, game_class_name: &str) -> Hints {
+    use crate::proto::{
+        recovery::{
+            field_key,
+            flow::{ParserLayout, field_copies},
+        },
+        type_references::TypeReferences,
+    };
+    use reflection::runtime_type::RuntimeType;
+    let mut hints = Hints::new();
+    let Some(owner) = il2cpp::get_cached_class("RPG.Client.ServerDispatchData")
+        .and_then(|c| RuntimeType::from_class(c).ok())
+    else {
+        return hints;
+    };
+    let methods: Vec<_> = owner
+        .get_methods_il2cpp()
+        .into_iter()
+        .filter(|m| m.get_name().is_ok_and(|n| n.as_str() == method_name))
+        .collect();
+    let [method] = methods.as_slice() else {
+        return hints;
+    };
+    let Some(proto) = method
+        .get_parameters()
+        .first()
+        .and_then(|p| p.get_parameter_type().ok())
+    else {
+        return hints;
+    };
+    let Some(game) = il2cpp::get_cached_class(game_class_name) else {
+        return hints;
+    };
+    let Ok(game_type) = RuntimeType::from_class(game) else {
+        return hints;
+    };
+    let Some(item) = items.get(&proto) else {
+        return hints;
+    };
+    let item = item.borrow();
+    let crate::proto::output::ProtoItem::Message(message) = &*item else {
+        return hints;
+    };
+    let fields: HashMap<_, _> = message
+        .fields
+        .iter()
+        .map(|f| (f.offset, field_key(&message.name, f.number)))
+        .collect();
+    #[cfg(feature = "gateway-network")]
+    if method_name == "_ParseServerDispatchData" {
+        decode_gateway::set_proto_fields(
+            message
+                .fields
+                .iter()
+                .map(|f| (f.number, field_key(&message.name, f.number)))
+                .collect(),
+        );
+    }
+    let Ok(rva) = method.get_il2cpp_method().checked_rva() else {
+        return hints;
+    };
+    if !utils::scanner::game_assembly_functions()
+        .ok()
+        .and_then(|table| table.containing(rva))
+        .is_some_and(|range| range.start as usize == rva)
+    {
+        hints.entries.push(crate::proto::recovery::candidate(
+            &message.name,
+            "",
+            &format!("{method_name} RVA 0x{rva:X}: not a complete PE function entry"),
+            crate::proto::recovery::Evidence::Hint,
+        ));
+        return hints;
+    }
+    let Ok(bytes) = utils::scanner::game_assembly_function(rva) else {
+        return hints;
+    };
+    let Ok(references) = TypeReferences::from_runtime() else {
+        return hints;
+    };
+    let Some(&allocation) = crate::proto::IL2CPP_OBJECT_NEW_RVA.get() else {
+        return hints;
+    };
+    let game_fields = super::build_game_offset_candidates(game_type);
+    let layout = ParserLayout {
+        proto_argument: if method.is_static() {
+            Register::RCX
+        } else {
+            Register::RDX
+        },
+        game_argument: (!method.is_static() && owner == game_type).then_some(Register::RCX),
+        allocation: *il2cpp::GA_BASE + allocation,
+        game_class: game.0,
+    };
+    match field_copies(bytes, *il2cpp::GA_BASE + rva, layout, |slot| {
+        references.class_from_slot(slot).map(|c| c.0)
+    }) {
+        Ok(copies) => {
+            for copy in copies {
+                if let (Some(key), Some(names)) = (
+                    fields.get(&copy.proto_offset),
+                    game_fields.get(&(copy.game_offset as usize)),
+                ) {
+                    hints.context(
+                        format!(
+                            "{game_class_name}::{method_name}; copy at RVA 0x{:X}",
+                            copy.instruction - *il2cpp::GA_BASE
+                        ),
+                        rva,
+                    );
+                    for name in names {
+                        hints.insert(key.clone(), name.clone());
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            hints.entries.push(crate::proto::recovery::candidate(
+                &message.name,
+                "",
+                &format!("{method_name} RVA 0x{rva:X}: {error:#}"),
+                crate::proto::recovery::Evidence::Hint,
+            ));
+        }
+    }
+    hints
 }
 
 pub fn full_reg(r: Register) -> Register {

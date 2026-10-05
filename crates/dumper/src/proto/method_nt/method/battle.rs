@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use crate::proto::recovery::Hints;
 
 use il2cpp::vm::value::Il2CppValue;
 use reflection::{attributes::MethodAttributes, runtime_type::RuntimeType};
 
-pub fn get_battle_send_nt() -> HashMap<String, String> {
-    let mut map = HashMap::new();
+pub fn get_battle_send_nt() -> Hints {
+    let mut map = Hints::new();
     let mapping = [
         ("<SendPVEBattleResultCsReq", "BattleOp"),
         ("<SendIdleLiveReplaceTeamCsReq", "KVP"),
@@ -42,8 +42,8 @@ pub fn get_battle_send_nt() -> HashMap<String, String> {
     map
 }
 
-pub fn get_compare_repeated_nt() -> HashMap<String, String> {
-    let mut map = HashMap::new();
+pub fn get_compare_repeated_nt() -> Hints {
+    let mut map = Hints::new();
     const PREFIX: &str = "<_CompareRepeated";
 
     let handler = il2cpp::FUNCTIONS_TABLE
@@ -89,10 +89,7 @@ pub fn get_compare_repeated_nt() -> HashMap<String, String> {
             .and_then(|p| super::non_null_type(p.get_parameter_type()))
         {
             let obf_name = param_type.il_name();
-            if obf_name.len() == 11
-                && obf_name.chars().all(char::is_uppercase)
-                && !map.contains_key(obf_name.as_ref())
-            {
+            if obf_name.len() == 11 && obf_name.chars().all(char::is_uppercase) {
                 log::debug!("[Method NT] param nt: {obf_name} -> {inner}");
                 map.insert(obf_name.into_owned(), inner.to_string());
             }
@@ -105,8 +102,8 @@ pub fn get_compare_repeated_nt() -> HashMap<String, String> {
     map
 }
 
-pub fn get_battle_grid_fight_equip_nt() -> HashMap<String, String> {
-    let mut map = HashMap::new();
+pub fn get_battle_grid_fight_equip_nt() -> Hints {
+    let mut map = Hints::new();
 
     let Some(c_class) = il2cpp::get_cached_class("RPG.Client.GridFightGameSession.<>c")
         .and_then(|c| RuntimeType::from_class(c).ok())
@@ -127,10 +124,7 @@ pub fn get_battle_grid_fight_equip_nt() -> HashMap<String, String> {
             .and_then(|p| super::non_null_type(p.get_parameter_type()))
         {
             let obf_name = param_type.il_name();
-            if obf_name.len() == 11
-                && obf_name.chars().all(char::is_uppercase)
-                && !map.contains_key(obf_name.as_ref())
-            {
+            if obf_name.len() == 11 && obf_name.chars().all(char::is_uppercase) {
                 log::debug!("[Method NT] param nt: {obf_name} -> BattleGridFightEquipInfo");
                 map.insert(
                     obf_name.into_owned(),
@@ -146,8 +140,8 @@ pub fn get_battle_grid_fight_equip_nt() -> HashMap<String, String> {
     map
 }
 
-pub fn get_grid_fight_statistics_nt() -> HashMap<String, String> {
-    let mut map = HashMap::new();
+pub fn get_grid_fight_statistics_nt() -> Hints {
+    let mut map = Hints::new();
 
     let stats_type = il2cpp::get_cached_class("RPG.GameCore.GridFightManager")
         .and_then(|c| RuntimeType::from_class(c).ok())
@@ -175,10 +169,7 @@ pub fn get_grid_fight_statistics_nt() -> HashMap<String, String> {
             && let Some(p0) = super::non_null_type(params[0].get_parameter_type())
         {
             let obf_name = p0.il_name();
-            if obf_name.len() == 11
-                && obf_name.chars().all(char::is_uppercase)
-                && !map.contains_key(obf_name.as_ref())
-            {
+            if obf_name.len() == 11 && obf_name.chars().all(char::is_uppercase) {
                 log::debug!("[Method NT] param nt: {obf_name} -> GridFightInfo");
                 map.insert(obf_name.into_owned(), "GridFightInfo".to_string());
             }

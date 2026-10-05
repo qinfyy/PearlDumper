@@ -1,3 +1,4 @@
+use crate::proto::recovery::Hints;
 use std::collections::HashMap;
 
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
@@ -6,8 +7,8 @@ use utils::scanner::game_assembly_function;
 
 use crate::proto::output::{ProtoItem, TypeToItemMap};
 
-pub fn process(type_to_item: &TypeToItemMap) -> HashMap<String, String> {
-    let mut map = HashMap::new();
+pub fn process(type_to_item: &TypeToItemMap) -> Hints {
+    let mut map = Hints::new();
 
     let result = il2cpp::get_cached_class("RPG.Client.InventoryModule")
         .and_then(|c| RuntimeType::from_class(c).ok())
@@ -46,6 +47,7 @@ pub fn process(type_to_item: &TypeToItemMap) -> HashMap<String, String> {
         return map;
     };
     let ip = (ga_base + handler_rva) as u64;
+    map.context("PlayerSyncScNotify", handler_rva);
 
     let mut decoder = Decoder::with_ip(64, data, ip, DecoderOptions::NONE);
     let mut insn = Instruction::default();
@@ -143,7 +145,12 @@ pub fn process(type_to_item: &TypeToItemMap) -> HashMap<String, String> {
             ProtoItem::Message(m) => Some(
                 m.fields
                     .iter()
-                    .map(|f| (f.offset as usize, f.name.clone()))
+                    .map(|f| {
+                        (
+                            f.offset as usize,
+                            crate::proto::recovery::field_key(&m.name, f.number),
+                        )
+                    })
                     .collect(),
             ),
             _ => None,

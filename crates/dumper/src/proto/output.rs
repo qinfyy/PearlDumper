@@ -305,7 +305,7 @@ fn process_cmd_id(
         if candidates.len() == 1 {
             names.insert(obfuscated, candidates.into_iter().next().unwrap());
         } else {
-            log::warn!("Conflicting protocol names for {obfuscated}: {candidates:?}");
+            log::debug!("NT checkpoint has conflicting names for {obfuscated}: {candidates:?}");
         }
     }
 
@@ -358,7 +358,9 @@ fn process_cmd_id(
         for originals in output_names.values().filter(|names| names.len() > 1) {
             for original in originals {
                 if local_names.remove(*original).is_some() {
-                    log::warn!("Protocol name collision for {original}; retaining original name");
+                    log::debug!(
+                        "NT checkpoint collision for {original}; final decision is deferred"
+                    );
                     removed = true;
                 }
             }
@@ -848,11 +850,12 @@ pub(super) fn finish_protobuf<W: Write>(
         type_names,
     );
 
-    apply_global_field_map(type_to_item, field_names);
+    apply_scoped_field_map(type_to_item, field_names);
     validate_output(type_to_item)?;
+    let mut rendered = Vec::new();
 
     writeln!(
-        out,
+        rendered,
         "syntax = \"proto3\"; // ex-RushiaLover ProtoDumper | Game Version: {}\n",
         il2cpp::profile::supported()?.version
     )?;
@@ -864,7 +867,7 @@ pub(super) fn finish_protobuf<W: Write>(
             .any(|field| field.kind.contains("google.protobuf.Any")),
         _ => false,
     }) {
-        writeln!(out, "import \"google/protobuf/any.proto\";\n")?;
+        writeln!(rendered, "import \"google/protobuf/any.proto\";\n")?;
     }
 
     for proto in type_to_item.values() {
@@ -881,13 +884,16 @@ pub(super) fn finish_protobuf<W: Write>(
                 }
             }
         }
-        writeln!(out, "{}", proto.fmt_protobuf_with_depth(0))?;
+        writeln!(rendered, "{}", proto.fmt_protobuf_with_depth(0))?;
     }
+
+    super::recovery::validation::validate_source(std::str::from_utf8(&rendered)?)?;
+    out.write_all(&rendered)?;
 
     Ok((cmd_ids, nt_map))
 }
 
-pub fn apply_global_field_map(type_to_item: &mut TypeToItemMap, map: &HashMap<String, String>) {
+pub fn apply_scoped_field_map(type_to_item: &mut TypeToItemMap, map: &HashMap<String, String>) {
     if map.is_empty() {
         return;
     }
@@ -901,9 +907,13 @@ pub fn apply_global_field_map(type_to_item: &mut TypeToItemMap, map: &HashMap<St
                 .chain(msg.oneofs.iter_mut().flat_map(|oneof| &mut oneof.fields))
                 .collect();
             let originals: Vec<_> = fields.iter().map(|field| field.name.clone()).collect();
-            let mut proposed: Vec<_> = originals
+            let mut proposed: Vec<_> = fields
                 .iter()
-                .map(|name| map.get(name).unwrap_or(name).clone())
+                .map(|field| {
+                    map.get(&super::recovery::field_key(&msg.name, field.number))
+                        .unwrap_or(&field.name)
+                        .clone()
+                })
                 .collect();
             loop {
                 let mut counts = HashMap::new();

@@ -22,6 +22,7 @@ mod nt;
 mod output;
 mod proto_asm_parser;
 mod proto_stream;
+pub(crate) mod recovery;
 mod runtime;
 mod type_references;
 pub mod util;
@@ -95,6 +96,22 @@ pub enum ProtoDumpMode {
 }
 
 pub fn dump<W: Write>(
+    out: &mut W,
+    cmdid_out: &mut W,
+    dump_mode: ProtoDumpMode,
+    enable_logging: bool,
+) -> anyhow::Result<()> {
+    recovery::begin()?;
+    let result = crate::guarded(|| dump_inner(out, cmdid_out, dump_mode, enable_logging));
+    if let Err(error) = &result {
+        if let Err(report_error) = recovery::record_failure(error) {
+            log::error!("Cannot record NT failure: {report_error:#}");
+        }
+    }
+    result
+}
+
+fn dump_inner<W: Write>(
     out: &mut W,
     cmdid_out: &mut W,
     dump_mode: ProtoDumpMode,
@@ -242,9 +259,18 @@ pub fn dump<W: Write>(
         (names, items)
     };
 
+    let mut recovery = recovery::Recovery::new(&type_to_item, &core_names)?;
+    recovery.add(std::mem::take(&mut request_scan.name_hints));
     log::info!("Recovering protocol names and field names from HSR-OWNER handlers");
-    let (method_handler_map, mut method_nt_map) = method_nt::get_method_nt_map()
+    let (method_handler_map, method_nt_map) = method_nt::get_method_nt_map()
         .context("protocol name recovery failed; verified core protocol files are retained")?;
+    recovery.add(method_nt_map);
+    let (initial_names, _) = recovery.resolve();
+    // Only the central decision set may rename the final model.
+    for (_, name) in req_map.values_mut() {
+        *name = None;
+    }
+    let rsp_notify_names = HashMap::new();
     log::info!("Building named protocol model for field recovery");
     let (_, proto_name_map) = output::finish_protobuf(
         &mut type_to_item,
@@ -252,7 +278,7 @@ pub fn dump<W: Write>(
         &rsp_notify_map,
         &req_map,
         &rsp_notify_names,
-        &method_nt_map,
+        &initial_names,
         &HashMap::new(),
         std::io::sink(),
     )?;
@@ -284,6 +310,7 @@ pub fn dump<W: Write>(
             .extend(rvas.iter().map(|rva| format!("0x{rva:X}")));
     }
     for (name, rvas) in method_handler_map {
+        let name = proto_name_map.get(&name).cloned().unwrap_or(name);
         sc_packet_handlers.entry(name).or_default().extend(rvas);
     }
     for rvas in sc_packet_handlers.values_mut() {
@@ -293,32 +320,29 @@ pub fn dump<W: Write>(
     }
 
     log::info!("Recovering global protocol field names");
-    let mut proto_field_map = crate::guarded(|| Ok(method_nt::dump_global_field_map()))
+    let mut global_hints = crate::guarded(|| Ok(method_nt::dump_global_field_map()))
         .context("global protocol field names")?;
+    for c in &mut global_hints.entries {
+        c.symbol = format!("legacy-field:{}", c.symbol);
+        c.evidence = recovery::Evidence::Hint;
+    }
+    recovery.add(global_hints);
     log::info!("Recovering protocol field names from packet handlers");
     let handler_fields =
         handler_nt::get_handler_nt_map(&type_to_item).context("packet handler field names")?;
-    for (key, value) in handler_fields {
-        proto_field_map.entry(key).or_insert(value);
-    }
+    recovery.add(handler_fields);
+    let (type_names, field_names) = recovery.resolve();
     log::info!("Applying protocol logic name rules");
     let recovered = crate::guarded(|| {
-        logic_nt::run_logic_nt(
+        Ok(logic_nt::run_logic_nt(
             &type_to_item.values().cloned().collect::<Vec<_>>(),
-            &proto_name_map,
-            &proto_field_map,
-        )
+            &type_names,
+            &field_names,
+        ))
     })
     .context("protocol logic name rules")?;
-    for (obfuscated, name) in recovered.types {
-        let has_explicit_name = proto_name_map
-            .get(&obfuscated)
-            .is_some_and(|known| known != &obfuscated);
-        if !has_explicit_name {
-            method_nt_map.entry(obfuscated).or_insert(name);
-        }
-    }
-    proto_field_map = recovered.fields;
+    recovery.add(recovered);
+    let (type_names, field_names) = recovery.resolve();
 
     log::info!("Writing final protocol output");
     let (cmd_ids, final_names) = output::finish_protobuf(
@@ -327,8 +351,8 @@ pub fn dump<W: Write>(
         &rsp_notify_map,
         &req_map,
         &rsp_notify_names,
-        &method_nt_map,
-        &proto_field_map,
+        &type_names,
+        &field_names,
         out,
     )?;
     validate_packet_ids(&cmd_ids, &type_to_item, &request_scan.registry.all)?;
@@ -339,6 +363,15 @@ pub fn dump<W: Write>(
         .iter()
         .map(|(obf, name)| (name.as_str(), obf.as_str()))
         .collect();
+    let defined_names: std::collections::HashSet<_> = type_to_item
+        .values()
+        .map(|item| match &*item.borrow() {
+            output::ProtoItem::Message(m) => {
+                m.deobfuscated_name.as_ref().unwrap_or(&m.name).clone()
+            }
+            output::ProtoItem::Enum(e) => e.deobfuscated_name.as_ref().unwrap_or(&e.name).clone(),
+        })
+        .collect();
     for handlers in [&mut cs_type_infos, &mut sc_packet_handlers] {
         let mut renamed = HashMap::<String, Vec<String>>::new();
         for (name, rvas) in handlers.drain() {
@@ -348,7 +381,9 @@ pub fn dump<W: Write>(
                 .map(String::as_str)
                 .unwrap_or(original)
                 .to_owned();
-            renamed.entry(name).or_default().extend(rvas);
+            if defined_names.contains(&name) {
+                renamed.entry(name).or_default().extend(rvas);
+            }
         }
         for rvas in renamed.values_mut() {
             rvas.sort_unstable();
@@ -394,6 +429,7 @@ pub fn dump<W: Write>(
         cmd_ids.len(),
         started.elapsed().as_secs_f64()
     );
+    recovery.finish(&type_to_item, &final_names)?;
     Ok(())
 }
 

@@ -15,6 +15,7 @@ use utils::scanner::{
 
 use super::{
     MessageMinimalInfo, native,
+    recovery::{Evidence, Hints},
     runtime::{PacketRegistry, ProtocolRuntime},
     type_references::TypeReferences,
 };
@@ -23,8 +24,9 @@ pub(super) struct RequestScan {
     runtime: ProtocolRuntime,
     references: TypeReferences,
     targets: HashMap<usize, native::SendRegisters>,
-    method_names: HashMap<usize, String>,
+    method_names: HashMap<usize, BTreeSet<String>>,
     pub registry: PacketRegistry,
+    pub name_hints: Hints,
 }
 
 pub(super) fn prepare_request_scan() -> anyhow::Result<RequestScan> {
@@ -39,6 +41,7 @@ pub(super) fn prepare_request_scan() -> anyhow::Result<RequestScan> {
         targets,
         method_names,
         registry,
+        name_hints: Hints::new(),
     })
 }
 
@@ -117,8 +120,14 @@ pub(super) fn get_req_map(
                 continue;
             };
             rvas.entry(ty).or_default().push(rva);
-            if let Some(name) = scan.method_names.get(&(*GA_BASE + rva)) {
-                names.entry(ty).or_default().insert(name.clone());
+            if let Some(aliases) = scan.method_names.get(&(*GA_BASE + rva)) {
+                for name in aliases {
+                    names.entry(ty).or_default().insert(name.clone());
+                    scan.name_hints
+                        .context(format!("XLua::{name}; CmdId={}", entry.id), rva);
+                    scan.name_hints
+                        .insert(ty.format_type_name(true), name.clone());
+                }
             }
         }
     }
@@ -128,10 +137,13 @@ pub(super) fn get_req_map(
             req_map.get_mut(&ty).unwrap().1 = candidates.into_iter().next();
         } else {
             conflicts += 1;
-            log::warn!(
-                "Ambiguous request name for {}: {candidates:?}; retaining obfuscated name",
-                ty.il_name()
-            );
+            let identity = ty.format_type_name(true);
+            for c in &mut scan.name_hints.entries {
+                if c.symbol == identity {
+                    c.evidence = Evidence::Hint;
+                    c.source.push_str(" (shared request business alias)");
+                }
+            }
         }
     }
     for entries in rvas.values_mut() {
@@ -196,18 +208,27 @@ pub(super) fn get_rsp_notify_names(
             }
         };
         if let Some(ty) = ty {
-            candidates
-                .entry(ty.format_type_name(true))
-                .or_default()
-                .insert(name.replace("Cmd", "").replace("ScRep", "ScRsp"));
+            let name = name
+                .strip_suffix("ScRep")
+                .map(|s| format!("{s}ScRsp"))
+                .unwrap_or_else(|| name.to_owned());
+            scan.name_hints.context(signature.clone(), rva);
+            scan.name_hints
+                .insert(ty.format_type_name(true), name.clone());
+            if name.ends_with("ScRsp") || name.ends_with("ScNotify") {
+                candidates
+                    .entry(ty.format_type_name(true))
+                    .or_default()
+                    .insert(name);
+            } else {
+                scan.name_hints.entries.last_mut().unwrap().evidence = Evidence::Hint;
+            }
         }
     }
     let mut result = HashMap::new();
     for (ty, names) in candidates {
         if names.len() == 1 {
             result.insert(ty, names.into_iter().next().unwrap());
-        } else {
-            log::warn!("Ambiguous response name for {ty}: {names:?}; retaining obfuscated name");
         }
     }
     log::info!(

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use il2cpp::vm::value::Il2CppValue;
 use reflection::runtime_type::RuntimeType;
@@ -19,8 +19,18 @@ pub mod scene_battle_info;
 pub mod scene_info;
 
 pub fn build_game_offset_map(rt: RuntimeType) -> HashMap<usize, String> {
+    build_game_offset_candidates(rt)
+        .into_iter()
+        .filter_map(|(offset, names)| {
+            (names.len() == 1).then(|| (offset, names.into_iter().next().unwrap()))
+        })
+        .collect()
+}
+
+pub fn build_game_offset_candidates(rt: RuntimeType) -> HashMap<usize, BTreeSet<String>> {
+    use crate::proto::{output::snake_field, recovery::readable};
     let fields = rt.get_fields_il2cpp();
-    let mut map = HashMap::new();
+    let mut map = HashMap::<usize, BTreeSet<String>>::new();
     for prop in rt.get_properties(62) {
         if let (Ok(getter), Ok(name)) = (prop.get_get_method(true), prop.get_name()) {
             if getter.is_null() {
@@ -33,7 +43,11 @@ pub fn build_game_offset_map(rt: RuntimeType) -> HashMap<usize, String> {
                 .iter()
                 .find(|f| is_correct_getter(f.get_offset(), rva))
             {
-                map.insert(f.get_offset(), name.as_str().to_string());
+                if readable(&name.as_str()) {
+                    map.entry(f.get_offset())
+                        .or_default()
+                        .insert(snake_field(&name.as_str()));
+                }
             }
         }
     }
@@ -45,8 +59,11 @@ pub fn build_game_offset_map(rt: RuntimeType) -> HashMap<usize, String> {
                 .strip_prefix('<')
                 .and_then(|s| s.strip_suffix(">k__BackingField"))
                 .unwrap_or(&n);
-            map.entry(f.get_offset())
-                .or_insert_with(|| clean.to_string());
+            if readable(clean) {
+                map.entry(f.get_offset())
+                    .or_default()
+                    .insert(snake_field(clean));
+            }
         }
     }
 

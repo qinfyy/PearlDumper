@@ -1,3 +1,4 @@
+use crate::proto::recovery::Hints;
 use std::collections::HashMap;
 
 use iced_x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
@@ -6,8 +7,8 @@ use utils::scanner::game_assembly_function;
 
 use crate::proto::output::{ProtoItem, TypeToItemMap};
 
-pub fn process(type_to_item: &TypeToItemMap) -> HashMap<String, String> {
-    let mut map = HashMap::new();
+pub fn process(type_to_item: &TypeToItemMap) -> Hints {
+    let mut map = Hints::new();
 
     let handler_class_name = &*crate::proto::method_nt::method::avatar::AVATAR_HANDLER_CLASS;
     if handler_class_name.is_empty() {
@@ -48,7 +49,12 @@ pub fn process(type_to_item: &TypeToItemMap) -> HashMap<String, String> {
                     ProtoItem::Message(m) => Some(
                         m.fields
                             .iter()
-                            .map(|f| (f.offset as usize, f.name.clone()))
+                            .map(|f| {
+                                (
+                                    f.offset as usize,
+                                    crate::proto::recovery::field_key(&m.name, f.number),
+                                )
+                            })
                             .collect(),
                     ),
                     _ => None,
@@ -65,6 +71,7 @@ pub fn process(type_to_item: &TypeToItemMap) -> HashMap<String, String> {
             continue;
         };
         let ip = (ga_base + *rva) as u64;
+        map.context(module_path!(), *rva);
 
         let mut decoder = Decoder::with_ip(64, data, ip, DecoderOptions::NONE);
         let mut insn = Instruction::default();

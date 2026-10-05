@@ -1,4 +1,5 @@
 use crate::proto::get_cached_class;
+use crate::proto::recovery::Hints;
 use crate::proto::util;
 use anyhow::Context;
 use il2cpp::vm::{metadata_cache, value::Il2CppValue};
@@ -13,8 +14,7 @@ pub mod method;
 mod param_nt;
 mod param_table;
 
-pub fn get_method_nt_map() -> anyhow::Result<(HashMap<String, Vec<String>>, HashMap<String, String>)>
-{
+pub fn get_method_nt_map() -> anyhow::Result<(HashMap<String, Vec<String>>, Hints)> {
     log::info!("[Method NT] Recovering names from the parameter table");
     let (method_map, mut proto_name_map) =
         crate::guarded(|| Ok(param_nt::process_table(param_table::PARAM_NT_MAP)))
@@ -30,48 +30,16 @@ pub fn get_method_nt_map() -> anyhow::Result<(HashMap<String, Vec<String>>, Hash
     let enum_count = enum_map.len();
     proto_name_map.extend(enum_map);
 
-    let deobf_to_obf: HashMap<&str, &str> = proto_name_map
-        .iter()
-        .map(|(k, v)| (v.as_str(), k.as_str()))
-        .collect();
-
-    let param_output: Vec<String> = param_table::PARAM_NT_MAP
-        .iter()
-        .filter_map(|(_, _, output_key, _)| {
-            deobf_to_obf
-                .get(output_key)
-                .map(|obf| format!("{obf} {output_key}"))
-        })
-        .collect();
-
-    let method_output: Vec<String> = proto_name_map
-        .iter()
-        .filter(|(obf, _)| !param_output.iter().any(|l| l.starts_with(obf.as_str())))
-        .map(|(obf, deobf)| format!("{obf} {deobf}"))
-        .collect();
-
-    let param_count = param_output.len();
-    let output_lines: Vec<String> = param_output.into_iter().chain(method_output).collect();
-
-    if !output_lines.is_empty() {
-        std::fs::write("./DUMP/method_nt.txt", output_lines.join("\n"))
-            .context("writing method_nt.txt")?;
-    }
-
-    log::debug!(
-        "[Method NT] total: {} | param_nt: {} | method_nt: {} | enum_nt: {}",
-        proto_name_map.len(),
-        param_count,
-        method_count,
-        enum_count,
+    log::info!(
+        "[Method NT] {} candidates, {method_count} method observations, {enum_count} enum observations",
+        proto_name_map.len()
     );
-
-    let _ = CACHED_NT_MAP.set(proto_name_map.clone());
+    let _ = CACHED_NT_MAP.set(proto_name_map.unique());
 
     Ok((method_map, proto_name_map))
 }
 
-pub fn dump_global_field_map() -> HashMap<String, String> {
+pub fn dump_global_field_map() -> Hints {
     let mut proto_props = HashSet::<String>::new();
 
     for i in unsafe { il2cpp::RPG_NETWORK_PROTO_START }..unsafe { il2cpp::RPG_NETWORK_PROTO_END } {
@@ -85,7 +53,7 @@ pub fn dump_global_field_map() -> HashMap<String, String> {
         }
     }
 
-    let mut map = HashMap::<String, String>::new();
+    let mut map = Hints::new();
 
     for i in 0..unsafe { il2cpp::MAX_TYPEDEFINDEX } {
         let Ok(runtime_type) =
@@ -96,7 +64,7 @@ pub fn dump_global_field_map() -> HashMap<String, String> {
 
         for prop in runtime_type.get_properties(62) {
             let prop_name = prop.get_name().unwrap().as_str();
-            if !proto_props.contains(prop_name.as_ref()) || map.contains_key(prop_name.as_ref()) {
+            if !proto_props.contains(prop_name.as_ref()) {
                 continue;
             }
 
@@ -129,8 +97,8 @@ pub fn dump_global_field_map() -> HashMap<String, String> {
     map
 }
 
-pub fn get_enum_names() -> HashMap<String, String> {
-    let mut output = HashMap::new();
+pub fn get_enum_names() -> Hints {
+    let mut output = Hints::new();
 
     let Some(class) = get_cached_class("XLua.ObjectTranslator.IniterAdderUnityEngineVector2")
     else {
