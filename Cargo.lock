@@ -126,6 +126,7 @@ name = "castorice-config"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "log",
  "serde",
  "toml",
 ]
@@ -136,6 +137,7 @@ version = "0.1.0"
 dependencies = [
  "ansi_term",
  "anyhow",
+ "castorice-config",
  "dumper",
  "env_logger",
  "il2cpp",
@@ -562,6 +564,9 @@ name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "logos"

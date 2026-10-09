@@ -127,11 +127,10 @@ impl DumpReport {
     }
 }
 
-pub fn run() -> anyhow::Result<()> {
+pub fn run(config: &Config) -> anyhow::Result<()> {
     // Validate all options before making the first call into the game.
-    let config = Config::load()?;
-    let stages = if let Ok(selection) = std::env::var("CASTORICE_DUMP") {
-        log::info!("Using CASTORICE_DUMP override: {selection}");
+    let stages = if let Ok(selection) = std::env::var("DUMPER_STAGES") {
+        log::info!("Using DUMPER_STAGES override: {selection}");
         parse_stages(&selection)?
     } else {
         config

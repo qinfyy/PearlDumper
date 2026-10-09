@@ -1,7 +1,5 @@
+use castorice_config::LoggingConfig;
 use env_logger::{Builder, Target, WriteStyle};
-
-const CONSOLE_FILTER: &str = "info";
-const FILE_FILTER: &str = "debug";
 
 struct Logger {
     console: env_logger::Logger,
@@ -32,11 +30,10 @@ fn install(logger: Logger) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn init() -> anyhow::Result<()> {
+pub fn init(config: &LoggingConfig) -> anyhow::Result<()> {
     use std::fs::OpenOptions;
 
     use anyhow::Context;
-    use env_logger::Env;
 
     dumper::ensure_output_directory()?;
     let file = OpenOptions::new()
@@ -50,11 +47,16 @@ pub fn init() -> anyhow::Result<()> {
     #[cfg(not(windows))]
     let ansi_error: Option<u32> = None;
 
-    let mut console = Builder::from_env(Env::new().default_filter_or(CONSOLE_FILTER));
+    let mut console = Builder::new();
+    console.filter_level(config.console_level);
+    if let Ok(style) = std::env::var("RUST_LOG_STYLE") {
+        console.parse_write_style(&style);
+    }
     if ansi_error.is_some() {
         console.write_style(WriteStyle::Never);
     }
-    let file = Builder::from_env(Env::new().default_filter_or(FILE_FILTER))
+    let file = Builder::new()
+        .filter_level(config.file_level)
         .write_style(WriteStyle::Never)
         .target(Target::Pipe(Box::new(file)))
         .build();

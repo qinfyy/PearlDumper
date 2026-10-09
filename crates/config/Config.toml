@@ -1,7 +1,6 @@
-# 导出阶段按这里的顺序执行。
-# 可选值：proto、schema、csharp。
-# 静态元数据导出请独立运行 morax.exe，不作为 Dumper 阶段执行。
-# 运行时工作目录中的 Config.toml 会覆盖编译时内置的这份默认配置。
-
 [output]
 stages = ["proto", "schema", "csharp"]
+
+[logging]
+console_level = "info"
+file_level = "debug"

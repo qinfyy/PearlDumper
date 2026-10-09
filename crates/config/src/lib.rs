@@ -4,10 +4,11 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_CONFIG: &str = include_str!("../Config.toml");
-const CONFIG_ENV: &str = "CASTORICE_CONFIG";
+const CONFIG_ENV: &str = "DUMPER_CONFIG";
 const CONFIG_FILE_NAME: &str = "Config.toml";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -35,12 +36,31 @@ impl OutputKind {
 pub struct Config {
     #[serde(default)]
     pub output: OutputConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             output: OutputConfig::default(),
+            logging: LoggingConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LoggingConfig {
+    pub console_level: LevelFilter,
+    pub file_level: LevelFilter,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            console_level: LevelFilter::Info,
+            file_level: LevelFilter::Debug,
         }
     }
 }

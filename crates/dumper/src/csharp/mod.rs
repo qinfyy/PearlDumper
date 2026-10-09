@@ -41,7 +41,8 @@ pub fn dump() -> Result<()> {
     let final_name = "DUMP/dump.cs";
     let file = File::create(partial).with_context(|| format!("creating {partial}"))?;
     let mut out = BufWriter::with_capacity(1024 * 1024, file);
-    writeln!(out, "// Castorice Dumper native C# export")?;
+    let mut assemblies = dump_header(&mut out, classes)?;
+    writeln!(out, "// Native C# export")?;
     writeln!(
         out,
         "// Types, fields and methods; native metadata names are preserved.\n"
@@ -49,7 +50,6 @@ pub fn dump() -> Result<()> {
 
     let mut stats = Stats::default();
     let mut seen = HashSet::with_capacity(total);
-    let mut assemblies = HashMap::new();
     let mut body = String::with_capacity(16 * 1024);
     let mut last_progress = started;
     let mut last_index = 0;
@@ -100,7 +100,7 @@ pub fn dump() -> Result<()> {
         let type_name = class.get_name();
         let type_name = if type_name.is_empty() {
             stats.empty_type_names += 1;
-            log::warn!(
+            log::debug!(
                 "Csharp empty class name: {assembly}: typedef {index}, class=0x{:X}; writing \"\" and preserving members",
                 class.0
             );
@@ -156,6 +156,64 @@ pub fn dump() -> Result<()> {
         started.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+fn dump_header(out: &mut impl IoWrite, classes: &[Il2CppClass]) -> Result<HashMap<usize, String>> {
+    let domain = api::il2cpp_domain_get();
+    ensure!(domain.0 != 0, "Csharp header: null IL2CPP domain");
+    let mut assembly_count = 0;
+    let assembly_array = api::il2cpp_domain_get_assemblies(domain, &mut assembly_count);
+    ensure!(
+        (1..=1024).contains(&assembly_count)
+            && utils::memory::is_readable(
+                assembly_array as usize,
+                assembly_count * size_of::<usize>()
+            ),
+        "Csharp header: invalid assembly list (count {assembly_count})"
+    );
+    let mut names = HashMap::with_capacity(assembly_count);
+    let mut running_offset = 0usize;
+    for index in 0..assembly_count {
+        let assembly = unsafe { *assembly_array.add(index) };
+        if assembly.0 == 0 {
+            continue;
+        }
+        let image = api::il2cpp_assembly_get_image(assembly);
+        if image.0 == 0 {
+            continue;
+        }
+        let name = image.get_name().into_owned();
+        let class_count = api::il2cpp_image_get_class_count(image);
+        let next_offset = running_offset
+            .checked_add(class_count)
+            .context("Csharp header: type index overflow")?;
+        let image_classes = classes.get(running_offset..next_offset).with_context(|| {
+            format!("Csharp image {index} {name}: type range exceeds initialized cache")
+        })?;
+        // Header offsets must describe the same assembly order as the cached TypeDefIndex values.
+        if let (Some(first), Some(last)) = (image_classes.first(), image_classes.last()) {
+            ensure!(
+                first.0 != 0
+                    && last.0 != 0
+                    && first.get_image().0 == image.0
+                    && last.get_image().0 == image.0,
+                "Csharp image {index} {name}: type range does not match initialized cache"
+            );
+        }
+        writeln!(
+            out,
+            "// Image {index}: {name} - TypeDefIndexOffset: {running_offset}"
+        )?;
+        names.insert(image.0, name);
+        running_offset = next_offset;
+    }
+    ensure!(
+        running_offset == classes.len(),
+        "Csharp header: {running_offset} image types do not match {} cached types",
+        classes.len()
+    );
+    writeln!(out)?;
+    Ok(names)
 }
 
 fn render_type(

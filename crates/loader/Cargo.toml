@@ -12,6 +12,7 @@ doctest = false
 [dependencies]
 anyhow.workspace = true
 ansi_term.workspace = true
+castorice-config.workspace = true
 env_logger.workspace = true
 il2cpp.workspace = true
 log.workspace = true

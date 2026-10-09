@@ -19,10 +19,17 @@ use windows::{
 fn run(module: *mut c_void) -> anyhow::Result<()> {
     unsafe {
         let _ = AllocConsole();
-        let _ = SetConsoleTitleW(w!("Castorice Dumper"));
+        let _ = SetConsoleTitleW(w!("Dumper"));
     }
-    crate::logging::init()?;
-    tracing::info!("Castorice Dumper: target 4.6.51");
+    let config = castorice_config::Config::load();
+    // Keep configuration errors visible through the default logger.
+    let logging = config
+        .as_ref()
+        .map(|config| config.logging.clone())
+        .unwrap_or_default();
+    crate::logging::init(&logging)?;
+    let config = config?;
+    tracing::info!("Dumper: target 4.6.51");
     let build = if cfg!(debug_assertions) {
         "debug"
     } else {
@@ -75,7 +82,7 @@ fn run(module: *mut c_void) -> anyhow::Result<()> {
         "Game modules loaded in {:.2}s",
         started.elapsed().as_secs_f64()
     );
-    dumper::run()?;
+    dumper::run(&config)?;
     tracing::info!("Dump finished; output: DUMP");
     Ok(())
 }
