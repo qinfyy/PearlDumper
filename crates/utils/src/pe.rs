@@ -2,6 +2,44 @@ use std::ops::Range;
 
 use anyhow::{Context, ensure};
 
+pub struct SectionRange {
+    pub range: Range<usize>,
+    pub characteristics: u32,
+}
+
+pub fn mapped_sections(image: &[u8]) -> anyhow::Result<Vec<SectionRange>> {
+    ensure!(image.get(..2) == Some(b"MZ"), "invalid DOS signature");
+    let nt = read_u32(image, 0x3c)? as usize;
+    ensure!(
+        image.get(nt..nt + 4) == Some(b"PE\0\0"),
+        "invalid PE signature"
+    );
+    ensure!(
+        read_u16(image, nt + 4)? == 0x8664 && read_u16(image, nt + 24)? == 0x20b,
+        "expected x64 PE32+ image"
+    );
+    let optional_size = read_u16(image, nt + 20)? as usize;
+    ensure!(optional_size >= 64, "truncated PE optional header");
+    let image_size = read_u32(image, nt + 80)? as usize;
+    ensure!(image_size <= image.len(), "truncated mapped PE image");
+    let count = read_u16(image, nt + 6)? as usize;
+    ensure!((1..=96).contains(&count), "invalid PE section count");
+    let table = nt + 24 + optional_size;
+    let mut sections = Vec::with_capacity(count);
+    for index in 0..count {
+        let at = table + index * 40;
+        let start = read_u32(image, at + 12)? as usize;
+        let size = read_u32(image, at + 8)?.max(read_u32(image, at + 16)?) as usize;
+        let end = start.checked_add(size).context("section range overflow")?;
+        ensure!(end <= image_size, "section outside mapped image");
+        sections.push(SectionRange {
+            range: start..end,
+            characteristics: read_u32(image, at + 36)?,
+        });
+    }
+    Ok(sections)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FunctionRange {
     pub start: u32,
@@ -16,6 +54,7 @@ impl FunctionRange {
 
 pub struct FunctionTable {
     entries: Vec<FunctionRange>,
+    image_size: u32,
 }
 
 impl FunctionTable {
@@ -89,7 +128,10 @@ impl FunctionTable {
             entries.push(FunctionRange { start, end });
             previous_end = end;
         }
-        Ok(Self { entries })
+        Ok(Self {
+            entries,
+            image_size,
+        })
     }
 
     pub fn containing(&self, rva: usize) -> Option<FunctionRange> {
@@ -104,6 +146,35 @@ impl FunctionTable {
 
     pub fn entries(&self) -> &[FunctionRange] {
         &self.entries
+    }
+
+    // Only an absent unwind record is optional; invalid image ranges remain errors.
+    pub fn candidate_bytes<'a>(
+        &self,
+        image: &'a [u8],
+        rva: usize,
+    ) -> anyhow::Result<Option<&'a [u8]>> {
+        ensure!(
+            image.len() >= self.image_size as usize,
+            "truncated mapped PE image"
+        );
+        ensure!(
+            rva < self.image_size as usize,
+            "native function outside mapped image: 0x{rva:X}"
+        );
+        let Some(range) = self.containing(rva) else {
+            return Ok(None);
+        };
+        Ok(Some(
+            image
+                .get(rva..range.end as usize)
+                .context("native function outside mapped image")?,
+        ))
+    }
+
+    pub fn function_bytes<'a>(&self, image: &'a [u8], rva: usize) -> anyhow::Result<&'a [u8]> {
+        self.candidate_bytes(image, rva)?
+            .with_context(|| format!("no native function contains RVA 0x{rva:X}"))
     }
 }
 

@@ -4,8 +4,12 @@ pub mod decode_gateway;
 pub mod decoder;
 #[cfg(feature = "gateway-network")]
 pub mod dispatch;
+mod ipv4;
+mod names;
 pub mod parse_gate_server;
 pub mod region;
+mod secret;
+mod semantic;
 pub mod stop_info;
 
 use std::collections::HashMap;
@@ -48,11 +52,11 @@ fn recover_parser(items: &TypeToItemMap, method_name: &str, game_class_name: &st
     let [method] = methods.as_slice() else {
         return hints;
     };
-    let Some(proto) = method
-        .get_parameters()
-        .first()
-        .and_then(|p| p.get_parameter_type().ok())
-    else {
+    let parameters = method.get_parameters();
+    let [parameter] = parameters.as_slice() else {
+        return hints;
+    };
+    let Ok(proto) = parameter.get_parameter_type() else {
         return hints;
     };
     let Some(game) = il2cpp::get_cached_class(game_class_name) else {
@@ -61,6 +65,9 @@ fn recover_parser(items: &TypeToItemMap, method_name: &str, game_class_name: &st
     let Ok(game_type) = RuntimeType::from_class(game) else {
         return hints;
     };
+    if !method.get_return_type().is_ok_and(|ty| ty == game_type) {
+        return hints;
+    }
     let Some(item) = items.get(&proto) else {
         return hints;
     };
@@ -68,11 +75,17 @@ fn recover_parser(items: &TypeToItemMap, method_name: &str, game_class_name: &st
     let crate::proto::output::ProtoItem::Message(message) = &*item else {
         return hints;
     };
-    let fields: HashMap<_, _> = message
+    let mut fields = HashMap::<u32, Vec<String>>::new();
+    for f in message
         .fields
         .iter()
-        .map(|f| (f.offset, field_key(&message.name, f.number)))
-        .collect();
+        .chain(message.oneofs.iter().flat_map(|o| &o.fields))
+    {
+        fields
+            .entry(f.offset)
+            .or_default()
+            .push(field_key(&message.name, f.number));
+    }
     #[cfg(feature = "gateway-network")]
     if method_name == "_ParseServerDispatchData" {
         decode_gateway::set_proto_fields(
@@ -124,19 +137,19 @@ fn recover_parser(items: &TypeToItemMap, method_name: &str, game_class_name: &st
     }) {
         Ok(copies) => {
             for copy in copies {
-                if let (Some(key), Some(names)) = (
+                if let (Some(keys), Some(names)) = (
                     fields.get(&copy.proto_offset),
                     game_fields.get(&(copy.game_offset as usize)),
                 ) {
-                    hints.context(
-                        format!(
-                            "{game_class_name}::{method_name}; copy at RVA 0x{:X}",
-                            copy.instruction - *il2cpp::GA_BASE
-                        ),
-                        rva,
-                    );
+                    let [key] = keys.as_slice() else { continue };
                     for name in names {
-                        hints.insert(key.clone(), name.clone());
+                        name.submit(
+                            &mut hints,
+                            key,
+                            &format!("{}::{method_name}", owner.il_name()),
+                            rva,
+                            &copy,
+                        );
                     }
                 }
             }
@@ -149,6 +162,35 @@ fn recover_parser(items: &TypeToItemMap, method_name: &str, game_class_name: &st
                 crate::proto::recovery::Evidence::Hint,
             ));
         }
+    }
+    if method_name == "_ParseServerDispatchData" {
+        let mut identity = crate::proto::recovery::candidate(
+            &message.name,
+            "GateServer",
+            "ServerDispatchData parser: exact parameter and return signature; complete native body",
+            crate::proto::recovery::Evidence::Native,
+        );
+        identity.method = Some(format!("{}::{method_name}", owner.il_name()));
+        identity.rva = Some(rva);
+        hints.entries.push(identity);
+        names::normalize(&mut hints, |key| {
+            message
+                .fields
+                .iter()
+                .chain(message.oneofs.iter().flat_map(|o| &o.fields))
+                .find(|f| field_key(&message.name, f.number) == key)
+                .map(|f| f.kind.clone())
+        });
+        hints.extend(semantic::recover_ip(
+            &message,
+            game_type,
+            method,
+            bytes,
+            rva,
+            &references,
+            allocation,
+        ));
+        hints.extend(semantic::recover_secret(&message, proto, game_type, method));
     }
     hints
 }

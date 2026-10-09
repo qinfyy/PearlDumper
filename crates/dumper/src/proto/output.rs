@@ -857,7 +857,7 @@ pub(super) fn finish_protobuf<W: Write>(
     writeln!(
         rendered,
         "syntax = \"proto3\"; // ex-RushiaLover ProtoDumper | Game Version: {}\n",
-        il2cpp::profile::supported()?.version
+        *crate::version::GAME_VERSION
     )?;
     if type_to_item.values().any(|item| match &*item.borrow() {
         ProtoItem::Message(message) => message

@@ -11,25 +11,18 @@ use castorice_config::{Config, OutputKind};
 use serde::Serialize;
 
 mod csharp;
+mod metadata_runtime;
+pub mod metadata_scan;
 mod parser_data;
 pub mod proto;
-mod res;
 mod runtime;
-mod script;
-mod script_v2;
 mod version;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Stage {
     Proto,
     Schema,
-    Excel,
-    Config,
-    Textmap,
     Csharp,
-    Script,
-    ScriptV2,
-    Metadata,
 }
 
 impl TryFrom<OutputKind> for Stage {
@@ -39,13 +32,7 @@ impl TryFrom<OutputKind> for Stage {
         Ok(match kind {
             OutputKind::Proto => Self::Proto,
             OutputKind::Schema => Self::Schema,
-            OutputKind::Excel => Self::Excel,
-            OutputKind::Config => Self::Config,
-            OutputKind::Textmap => Self::Textmap,
             OutputKind::Csharp => Self::Csharp,
-            OutputKind::Script => Self::Script,
-            OutputKind::ScriptV2 => Self::ScriptV2,
-            OutputKind::Metadata => Self::Metadata,
         })
     }
 }
@@ -55,13 +42,7 @@ impl Stage {
         match self {
             Self::Proto => "proto",
             Self::Schema => "schema",
-            Self::Excel => "excel",
-            Self::Config => "config",
-            Self::Textmap => "textmap",
             Self::Csharp => "csharp",
-            Self::Script => "script",
-            Self::ScriptV2 => "script_v2",
-            Self::Metadata => "metadata",
         }
     }
 }
@@ -76,13 +57,15 @@ fn parse_stages(value: &str) -> anyhow::Result<Vec<Stage>> {
         let stage = match name {
             "proto" => Stage::Proto,
             "schema" | "parser" => Stage::Schema,
-            "excel" => Stage::Excel,
-            "config" => Stage::Config,
-            "textmap" => Stage::Textmap,
             "csharp" => Stage::Csharp,
-            "script" => Stage::Script,
-            "script_v2" => Stage::ScriptV2,
-            "metadata" => Stage::Metadata,
+            "excel" | "config" | "textmap" | "script" | "script_v2" => {
+                anyhow::bail!(
+                    "dump stage {name} was removed; supported stages: proto,schema,csharp"
+                )
+            }
+            "metadata" => anyhow::bail!(
+                "metadata is an independent offline tool; run morax.exe GAME_DIR OUTPUT_DIR"
+            ),
             _ => anyhow::bail!("unknown dump stage {name}"),
         };
         if !stages.contains(&stage) {
@@ -169,7 +152,7 @@ pub fn run() -> anyhow::Result<()> {
     );
     ensure_output_directory()?;
     let mut report = DumpReport {
-        client_version: il2cpp::profile::supported()?.version.clone(),
+        client_version: "unknown (dynamic discovery)".to_owned(),
         stages: std::iter::once("runtime")
             .chain(stages.iter().map(|stage| stage.name()))
             .map(|name| StageReport {
@@ -179,12 +162,9 @@ pub fn run() -> anyhow::Result<()> {
             })
             .collect(),
     };
-    if stages.iter().any(|stage| *stage != Stage::Metadata) {
-        report.execute(0, runtime::init_default)?;
-    } else {
-        report.stages[0].status = "not_required";
-        report.save()?;
-    }
+    report.execute(0, runtime::init_default)?;
+    report.client_version = version::GAME_VERSION.to_string();
+    report.save()?;
     for (index, stage) in stages.into_iter().enumerate() {
         report.execute(index + 1, || run_stage(stage))?;
     }
@@ -221,23 +201,7 @@ fn run_stage(stage: Stage) -> anyhow::Result<()> {
             result?;
         }
         Stage::Schema => parser_data::dump()?,
-        Stage::Excel => res::dump_excel()?,
-        Stage::Config => res::dump_config(),
-        Stage::Textmap => res::dump_textmap()?,
-        Stage::Csharp => csharp::dump(false)?,
-        Stage::Script => script::dump()?,
-        Stage::ScriptV2 => script_v2::dump()?,
-        Stage::Metadata => {
-            let (assembly, _) = il2cpp::profile::loaded_module_path("GameAssembly.dll")?;
-            let game_dir = assembly
-                .parent()
-                .context("GameAssembly.dll has no parent directory")?;
-            log::info!(
-                "Exporting original metadata from {} to DUMP/Morax",
-                game_dir.display()
-            );
-            morax::export::export_game(game_dir, std::path::Path::new("DUMP/Morax"))?;
-        }
+        Stage::Csharp => csharp::dump()?,
     }
     Ok(())
 }

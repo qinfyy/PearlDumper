@@ -1,7 +1,6 @@
 use std::{collections::HashMap, sync::OnceLock};
 
 use crate::vm::method::Il2CppMethod;
-use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiKind {
@@ -32,122 +31,67 @@ inventory::collect!(ApiEntry);
 
 static RESOLVED_APIS: OnceLock<HashMap<String, Il2CppMethod>> = OnceLock::new();
 
-#[derive(Debug, Deserialize)]
-pub struct BindingProfile {
-    pub version: String,
-    pub assembly_sha256: String,
-    pub bindings: Vec<Binding>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Binding {
-    pub signature: String,
-    pub class: String,
-    pub member: String,
-    pub parameter_count: usize,
-    pub instance: bool,
-    pub native: bool,
-    pub rva: usize,
-}
-
-pub fn supported_bindings() -> anyhow::Result<BindingProfile> {
-    Ok(serde_json::from_str(include_str!(
-        "../../../profiles/4.6.51-bindings.json"
-    ))?)
-}
-
 pub fn resolved_method(signature: &str) -> Option<Il2CppMethod> {
     RESOLVED_APIS.get()?.get(signature).copied()
 }
 
-pub fn validate_declarations(profile: &BindingProfile) -> anyhow::Result<()> {
-    let client = crate::profile::supported()?;
-    anyhow::ensure!(
-        profile.version == client.version && profile.assembly_sha256 == client.assembly.sha256,
-        "reflection bindings and client fingerprints do not match"
-    );
-    let mut signatures = std::collections::HashSet::new();
-    for binding in &profile.bindings {
-        anyhow::ensure!(
-            signatures.insert(&binding.signature),
-            "duplicate binding {}",
-            binding.signature
-        );
-        anyhow::ensure!(
-            binding.rva > 0 && binding.rva < client.assembly.image_size as usize,
-            "invalid RVA for {}",
-            binding.signature
-        );
+fn overload_parameters(entry: &ApiEntry) -> Option<&'static [&'static str]> {
+    match (entry.class, entry.member) {
+        ("System.Attribute", "GetCustomAttribute") => {
+            Some(&["System.Reflection.MemberInfo", "System.Type"])
+        }
+        ("System.Type", "GetMethod" | "GetProperty") => {
+            Some(&["System.String", "System.Reflection.BindingFlags"])
+        }
+        ("System.Type", "GetType") => Some(&["System.String", "System.Boolean", "System.Boolean"]),
+        ("System.RuntimeType", "IsAssignableFrom") => Some(&["System.Type"]),
+        _ => None,
     }
-    for entry in all_entries() {
-        let signature = entry.signature();
-        let binding = profile
-            .bindings
-            .iter()
-            .find(|binding| binding.signature == signature)
-            .ok_or_else(|| anyhow::anyhow!("missing verified binding {signature}"))?;
-        anyhow::ensure!(
-            binding.class == entry.class
-                && binding.member == entry.member
-                && binding.parameter_count == entry.parameter_count
-                && binding.instance == entry.instance
-                && binding.native == (entry.kind == ApiKind::Native),
-            "binding declaration changed: {signature}"
-        );
-    }
-    Ok(())
 }
 
-pub fn bind_profile() -> anyhow::Result<()> {
+pub fn bind_dynamic() -> anyhow::Result<()> {
     if RESOLVED_APIS.get().is_some() {
         return Ok(());
     }
-    let profile = supported_bindings()?;
-    validate_declarations(&profile)?;
     let mut resolved = HashMap::new();
-    log::info!(
-        "Resolving {} exact reflection bindings",
-        profile.bindings.len()
-    );
-    for (index, entry) in all_entries().enumerate() {
+    for entry in all_entries() {
         let signature = entry.signature();
-        let binding = profile
-            .bindings
-            .iter()
-            .find(|binding| binding.signature == signature)
-            .unwrap();
-        log::info!(
-            "Resolving binding {}/{}: {signature}, RVA=0x{:X}",
-            index + 1,
-            profile.bindings.len(),
-            binding.rva
-        );
-        let class = crate::get_cached_class(&binding.class)
-            .ok_or_else(|| anyhow::anyhow!("missing class {}", binding.class))?;
+        let class = crate::get_cached_class(entry.class)
+            .ok_or_else(|| anyhow::anyhow!("missing reflection class {}", entry.class))?;
         let matches = class
             .get_methods()
             .into_iter()
-            .filter(|method| method.get_name() == binding.member && method.rva() == binding.rva)
+            .filter(|method| {
+                method.get_name() == entry.member
+                    && crate::api::il2cpp_method_get_param_count(*method) as usize
+                        == entry.parameter_count
+                    && overload_parameters(entry).is_none_or(|parameters| {
+                        parameters.iter().enumerate().all(|(index, expected)| {
+                            crate::api::il2cpp_method_get_param(*method, index as u32).il_name()
+                                == *expected
+                        })
+                    })
+            })
             .collect::<Vec<_>>();
         anyhow::ensure!(
             matches.len() == 1,
-            "{signature}: expected one method at RVA 0x{:X}, found {}",
-            binding.rva,
+            "{signature}: dynamic signature matched {} methods; refusing to use an ordinal or guessed RVA",
             matches.len()
         );
         let method = matches[0];
-        anyhow::ensure!(
-            crate::api::il2cpp_method_get_param_count(method) as usize == binding.parameter_count,
-            "{signature}: runtime parameter count differs from dump"
-        );
-        // Method flags in the supplied dump are obfuscated; only check arity and the exact body here.
         method.checked_va()?;
-        resolved.insert(signature, method);
+        log::debug!(
+            "Dynamic reflection binding {signature}: RVA 0x{:X}",
+            method.rva()
+        );
+        anyhow::ensure!(
+            resolved.insert(signature.clone(), method).is_none(),
+            "duplicate reflection declaration {signature}"
+        );
     }
     log::info!(
-        "Resolved {} exact reflection bindings for {}",
-        resolved.len(),
-        profile.version
+        "Resolved {} reflection bindings from live method signatures",
+        resolved.len()
     );
     RESOLVED_APIS
         .set(resolved)

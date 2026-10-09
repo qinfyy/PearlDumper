@@ -9,8 +9,18 @@ pub struct Il2CppClass(pub usize);
 #[allow(unused)]
 impl Il2CppClass {
     #[inline]
+    pub fn get_name(&self) -> Cow<'static, str> {
+        unsafe { utils::cstr_to_str(api::il2cpp_class_get_name(*self)) }
+    }
+
+    #[inline]
     pub fn byval_arg(&self) -> Il2CppType {
         api::il2cpp_class_get_type(*self)
+    }
+
+    #[inline]
+    pub fn get_parent(&self) -> Il2CppClass {
+        api::il2cpp_class_get_parent(*self)
     }
 
     #[inline]
@@ -68,6 +78,43 @@ impl Il2CppClass {
             }
         }
         out
+    }
+
+    pub fn get_interfaces(&self) -> Vec<Il2CppClass> {
+        let mut iter = ptr::null();
+        let mut out = Vec::new();
+        loop {
+            let interface = api::il2cpp_class_get_interfaces(*self, &mut iter);
+            if interface.0 == 0 {
+                break;
+            }
+            out.push(interface);
+            assert!(
+                out.len() <= 65536,
+                "IL2CPP interface iteration did not terminate"
+            );
+        }
+        out
+    }
+
+    #[inline]
+    pub fn get_flags(&self) -> i32 {
+        api::il2cpp_class_get_flags(*self)
+    }
+
+    #[inline]
+    pub fn is_interface(&self) -> bool {
+        api::il2cpp_class_is_interface(*self)
+    }
+
+    #[inline]
+    pub fn is_valuetype(&self) -> bool {
+        api::il2cpp_class_is_valuetype(*self)
+    }
+
+    #[inline]
+    pub fn is_enum(&self) -> bool {
+        api::il2cpp_class_is_enum(*self)
     }
 }
 

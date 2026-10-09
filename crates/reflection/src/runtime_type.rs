@@ -175,6 +175,22 @@ impl RuntimeType {
         }
     }
 
+    pub fn try_get_generic_arguments(&self) -> Result<Vec<RuntimeType>> {
+        self.get_generic_arguments_internal()?.try_to_vec()
+    }
+
+    pub fn try_get_properties(&self, binding_flags: i32) -> Result<Vec<PropertyInfo>> {
+        self.get_properties_internal(binding_flags)?.try_to_vec()
+    }
+
+    pub fn try_get_events(&self, binding_flags: i32) -> Result<Vec<EventInfo>> {
+        self.get_events_internal(binding_flags)?.try_to_vec()
+    }
+
+    pub fn try_get_interfaces(&self) -> Result<Vec<RuntimeType>> {
+        self.get_interfaces_internal()?.try_to_vec()
+    }
+
     #[inline]
     pub fn get_properties(&self, binding_flags: i32) -> Vec<PropertyInfo> {
         unsafe {

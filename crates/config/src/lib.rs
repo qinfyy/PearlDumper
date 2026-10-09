@@ -15,39 +15,17 @@ const CONFIG_FILE_NAME: &str = "Config.toml";
 pub enum OutputKind {
     Proto,
     Schema,
-    Excel,
-    Config,
-    Textmap,
     Csharp,
-    Script,
-    ScriptV2,
-    Metadata,
 }
 
 impl OutputKind {
-    pub const ALL: [Self; 9] = [
-        Self::Proto,
-        Self::Schema,
-        Self::Excel,
-        Self::Config,
-        Self::Textmap,
-        Self::Csharp,
-        Self::Script,
-        Self::ScriptV2,
-        Self::Metadata,
-    ];
+    pub const ALL: [Self; 3] = [Self::Proto, Self::Schema, Self::Csharp];
 
     pub const fn name(self) -> &'static str {
         match self {
             Self::Proto => "proto",
             Self::Schema => "schema",
-            Self::Excel => "excel",
-            Self::Config => "config",
-            Self::Textmap => "textmap",
             Self::Csharp => "csharp",
-            Self::Script => "script",
-            Self::ScriptV2 => "script_v2",
-            Self::Metadata => "metadata",
         }
     }
 }
@@ -83,7 +61,7 @@ impl Default for OutputConfig {
 }
 
 fn default_stages() -> Vec<OutputKind> {
-    vec![OutputKind::Proto, OutputKind::Schema, OutputKind::Excel]
+    OutputKind::ALL.to_vec()
 }
 
 impl Config {

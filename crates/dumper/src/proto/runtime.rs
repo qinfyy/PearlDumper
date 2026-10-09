@@ -6,52 +6,39 @@ use il2cpp::{
     vm::{class::Il2CppClass, method::Il2CppMethod},
 };
 use reflection::runtime_type::RuntimeType;
-use serde::Deserialize;
 use utils::scanner::game_assembly_function;
 
 use super::{native, type_references::TypeReferences};
 
-#[derive(Deserialize)]
 pub(super) struct NativeBinding {
     pub rva: usize,
-    prefix: String,
 }
 
-#[derive(Deserialize)]
 pub(super) struct RegistryBinding {
-    class: String,
-    field: String,
-    #[serde(flatten)]
-    native: NativeBinding,
-    count: usize,
+    pub class: String,
+    pub field: String,
+    pub native: NativeBinding,
+    pub count: usize,
 }
 
-#[derive(Deserialize)]
 pub(super) struct XluaBinding {
-    class: String,
-    fields_class: String,
-    delegate_class: String,
-    #[serde(flatten)]
-    native: NativeBinding,
-    count: usize,
+    pub class: String,
+    pub fields_class: String,
+    pub delegate_class: String,
+    pub native: NativeBinding,
+    pub count: usize,
 }
 
-#[derive(Deserialize)]
 pub(super) struct SendBinding {
     pub signature: String,
-    #[serde(flatten)]
-    native: NativeBinding,
+    pub native: NativeBinding,
 }
 
-#[derive(Deserialize)]
-pub(super) struct ProtocolProfile {
-    version: String,
-    metadata_initializer: NativeBinding,
-    object_new: NativeBinding,
-    packets: RegistryBinding,
-    responses: RegistryBinding,
-    xlua: XluaBinding,
-    send_methods: Vec<SendBinding>,
+pub(super) struct ProtocolBindings {
+    pub packets: RegistryBinding,
+    pub responses: RegistryBinding,
+    pub xlua: XluaBinding,
+    pub send_methods: Vec<SendBinding>,
 }
 
 pub(super) struct PacketRegistry {
@@ -61,7 +48,7 @@ pub(super) struct PacketRegistry {
 }
 
 pub(super) struct ProtocolRuntime {
-    profile: ProtocolProfile,
+    bindings: ProtocolBindings,
     known_methods: HashMap<usize, Il2CppMethod>,
     initialized_usages: HashSet<u32>,
     pub allocation: usize,
@@ -69,38 +56,12 @@ pub(super) struct ProtocolRuntime {
 
 impl ProtocolRuntime {
     pub fn new() -> anyhow::Result<Self> {
-        let profile: ProtocolProfile =
-            serde_json::from_str(include_str!("../../../../profiles/4.6.51-protocol.json"))?;
+        let allocation = super::discovery::allocator()?;
+        let bindings = super::discovery::discover(allocation)?;
+        let allocation_rva = allocation - *il2cpp::GA_BASE;
         ensure!(
-            profile.version == il2cpp::profile::supported()?.version,
-            "protocol profile version mismatch"
-        );
-        validate_native(&profile.metadata_initializer)?;
-        validate_native(&profile.object_new)?;
-
-        // Resolve the public allocator through UnityPlayer's live API table, then check
-        // its direct call against the independently identified GameAssembly allocator.
-        let api = il2cpp::api::function_address(130)?;
-        let api_rva = api
-            .checked_sub(*il2cpp::GA_BASE)
-            .context("object_new API is outside GameAssembly")?;
-        let allocation = *il2cpp::GA_BASE + profile.object_new.rva;
-        let calls_allocator = iced_x86::Decoder::with_ip(
-            64,
-            game_assembly_function(api_rva)?,
-            api as u64,
-            iced_x86::DecoderOptions::NONE,
-        )
-        .into_iter()
-        .any(|instruction| native::direct_target(&instruction) == Some(allocation));
-        ensure!(
-            calls_allocator,
-            "IL2CPP allocator wrapper does not match the protocol profile"
-        );
-        ensure!(
-            *super::IL2CPP_OBJECT_NEW_RVA.get_or_init(|| profile.object_new.rva)
-                == profile.object_new.rva,
-            "protocol allocator changed after initialization"
+            *super::IL2CPP_OBJECT_NEW_RVA.get_or_init(|| allocation_rva) == allocation_rva,
+            "IL2CPP allocator changed after discovery"
         );
 
         let methods = il2cpp::FUNCTIONS_TABLE
@@ -110,7 +71,7 @@ impl ProtocolRuntime {
         // MethodInfo pointers, including the empty-name XLua registration methods.
         let known_methods = methods.values().map(|method| (method.0, *method)).collect();
         Ok(Self {
-            profile,
+            bindings,
             known_methods,
             initialized_usages: HashSet::new(),
             allocation,
@@ -118,7 +79,7 @@ impl ProtocolRuntime {
     }
 
     pub fn initialize_references(&mut self, rva: usize, bytes: &[u8]) -> anyhow::Result<()> {
-        let helper = *il2cpp::GA_BASE + self.profile.metadata_initializer.rva;
+        let helper = *il2cpp::GA_BASE + crate::metadata_runtime::plan()?.layout.initializer;
         for usage in native::metadata_usage_lists(bytes, *il2cpp::GA_BASE + rva, helper) {
             if self.initialized_usages.contains(&usage) {
                 continue;
@@ -126,15 +87,7 @@ impl ProtocolRuntime {
             log::debug!("Initializing metadata usage list 0x{usage:X} for RVA 0x{rva:X}");
             // This is the runtime's metadata resolver, not the game method or .cctor.
             // Leave the game's once flag untouched; its normal initialization still owns it.
-            microseh::try_seh(|| unsafe {
-                let initialize: unsafe extern "C" fn(u32) = std::mem::transmute(helper);
-                initialize(usage);
-            })
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "metadata usage list 0x{usage:X} failed at RVA 0x{rva:X}: {error:?}"
-                )
-            })?;
+            crate::metadata_runtime::initialize_list(usage)?;
             self.initialized_usages.insert(usage);
         }
         Ok(())
@@ -142,7 +95,7 @@ impl ProtocolRuntime {
 
     pub fn send_targets(&self) -> anyhow::Result<HashMap<usize, native::SendRegisters>> {
         let mut targets = HashMap::new();
-        for binding in &self.profile.send_methods {
+        for binding in &self.bindings.send_methods {
             validate_native(&binding.native)?;
             let method = get_native_method(&binding.signature)
                 .with_context(|| format!("missing send method {}", binding.signature))?;
@@ -168,7 +121,7 @@ impl ProtocolRuntime {
         &mut self,
         references: &TypeReferences,
     ) -> anyhow::Result<PacketRegistry> {
-        let packet_rva = validate_registry(&self.profile.packets)?;
+        let packet_rva = validate_registry(&self.bindings.packets)?;
         let packet_bytes = game_assembly_function(packet_rva)?;
         self.initialize_references(packet_rva, packet_bytes)?;
         let packet_scan = native::scan(
@@ -184,10 +137,10 @@ impl ProtocolRuntime {
             .max_by_key(|entries| entries.len())
             .context("packet registration calls not found")?;
         ensure!(
-            packets.len() == self.profile.packets.count,
+            packets.len() == self.bindings.packets.count,
             "incomplete packet registry: {}/{} entries",
             packets.len(),
-            self.profile.packets.count
+            self.bindings.packets.count
         );
         let mut all = HashMap::new();
         let mut by_id = HashMap::new();
@@ -219,7 +172,7 @@ impl ProtocolRuntime {
             );
         }
 
-        let response_rva = validate_registry(&self.profile.responses)?;
+        let response_rva = validate_registry(&self.bindings.responses)?;
         let response_bytes = game_assembly_function(response_rva)?;
         self.initialize_references(response_rva, response_bytes)?;
         let response_scan = native::scan(
@@ -235,10 +188,10 @@ impl ProtocolRuntime {
             .max_by_key(|entries| entries.len())
             .context("response registration calls not found")?;
         ensure!(
-            entries.len() == self.profile.responses.count,
+            entries.len() == self.bindings.responses.count,
             "incomplete response registry: {}/{} entries",
             entries.len(),
-            self.profile.responses.count
+            self.bindings.responses.count
         );
         let mut responses = HashMap::new();
         let mut handlers: HashMap<RuntimeType, Vec<usize>> = HashMap::new();
@@ -284,7 +237,7 @@ impl ProtocolRuntime {
     }
 
     pub fn xlua_method_names(&mut self) -> anyhow::Result<HashMap<usize, BTreeSet<String>>> {
-        let binding = &self.profile.xlua;
+        let binding = &self.bindings.xlua;
         let class = get_cached_class(&binding.class).context("XLua translator class is missing")?;
         let fields_class = get_cached_class(&binding.fields_class)
             .context("XLua delegate cache class is missing")?;
@@ -356,12 +309,12 @@ impl ProtocolRuntime {
         let methods = il2cpp::FUNCTIONS_TABLE
             .get()
             .context("method cache is missing")?;
-        let nested_prefix = format!("{}.", self.profile.xlua.class);
+        let nested_prefix = format!("{}.", self.bindings.xlua.class);
         for (signature, method) in methods {
             let Some((owner, member)) = signature.rsplit_once("::") else {
                 continue;
             };
-            if owner == self.profile.xlua.class || owner.starts_with(&nested_prefix) {
+            if owner == self.bindings.xlua.class || owner.starts_with(&nested_prefix) {
                 continue;
             }
             // Ordinal keys are only a prefilter. Confirm the actual metadata name before
@@ -391,20 +344,7 @@ impl ProtocolRuntime {
 }
 
 fn validate_native(binding: &NativeBinding) -> anyhow::Result<()> {
-    let bytes = game_assembly_function(binding.rva)?;
-    let expected = binding
-        .prefix
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| Ok(u8::from_str_radix(std::str::from_utf8(pair)?, 16)?))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    ensure!(
-        !expected.is_empty()
-            && binding.prefix.len().is_multiple_of(2)
-            && bytes.starts_with(&expected),
-        "native code does not match protocol profile at RVA 0x{:X}",
-        binding.rva
-    );
+    game_assembly_function(binding.rva)?;
     ensure!(
         utils::memory::is_executable(*il2cpp::GA_BASE + binding.rva),
         "non-executable native binding at RVA 0x{:X}",

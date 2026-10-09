@@ -44,7 +44,7 @@ pub fn get_handler_nt_map(type_to_item: &TypeToItemMap) -> anyhow::Result<Hints>
         log::info!("[Handler NT] Starting {name}");
         let mut entries = crate::guarded(|| Ok(recover(type_to_item)))
             .with_context(|| format!("packet handler field names: {name}"))?;
-        if name != "gate server" {
+        if !matches!(name, "gate server" | "equipment" | "relic" | "quest") {
             entries.advisory("legacy linear register/adjacency heuristic; requires independent scoped confirmation");
         }
         log::info!(

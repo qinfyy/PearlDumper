@@ -5,12 +5,15 @@ use std::{
 };
 
 use anyhow::Context;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::output::{ProtoItem, TypeToItemMap, short_name, snake_field};
 
+pub(super) mod accessor;
 pub(super) mod flow;
+pub(super) mod response;
+pub(super) mod response_names;
 pub(super) mod validation;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
@@ -198,6 +201,13 @@ struct Decision {
     reason: String,
 }
 
+#[derive(Deserialize, Serialize)]
+struct AcceptedMapping {
+    kind: String,
+    original: String,
+    name: String,
+}
+
 #[derive(Serialize)]
 pub(super) struct Report {
     format_version: u32,
@@ -205,6 +215,7 @@ pub(super) struct Report {
     pub inputs: BTreeMap<String, String>,
     pub notes: Vec<String>,
     decisions: BTreeMap<String, Decision>,
+    accepted_mappings: BTreeMap<String, AcceptedMapping>,
     counts: BTreeMap<String, usize>,
     pub error: Option<String>,
 }
@@ -228,6 +239,7 @@ impl Recovery {
                 inputs: BTreeMap::new(),
                 notes: Vec::new(),
                 decisions: BTreeMap::new(),
+                accepted_mappings: BTreeMap::new(),
                 counts: BTreeMap::new(),
                 error: None,
             },
@@ -487,6 +499,7 @@ impl Recovery {
             "NT changed definition count"
         );
         let (types, fields) = self.resolve();
+        self.report.accepted_mappings.clear();
         let mut scoped = BTreeMap::new();
         let mut global = BTreeMap::<String, BTreeSet<String>>::new();
         for (owner, before) in &self.schema {
@@ -506,6 +519,14 @@ impl Recovery {
             );
             if expected != *owner {
                 scoped.insert(owner.clone(), short_name(&expected).to_owned());
+                self.report.accepted_mappings.insert(
+                    owner.clone(),
+                    AcceptedMapping {
+                        kind: if before.is_enum { "enum" } else { "message" }.into(),
+                        original: owner.clone(),
+                        name: expected,
+                    },
+                );
             }
             for (number, f) in &before.fields {
                 let a = actual
@@ -527,6 +548,14 @@ impl Recovery {
                     .or_default()
                     .insert(snake_field(&a.name));
                 if snake_field(&f.name) != snake_field(&a.name) {
+                    self.report.accepted_mappings.insert(
+                        key.clone(),
+                        AcceptedMapping {
+                            kind: "field".into(),
+                            original: f.name.clone(),
+                            name: snake_field(&a.name),
+                        },
+                    );
                     scoped.insert(key, snake_field(&a.name));
                 }
             }
@@ -697,11 +726,17 @@ fn write_lines(path: &str, entries: &BTreeMap<String, String>) -> anyhow::Result
 }
 
 pub(crate) fn publish() -> anyhow::Result<()> {
+    let path = "DUMP/nt-report.json";
+    let mut report: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
+    anyhow::ensure!(
+        report["status"] == "validated_pending_publication",
+        "NT report is not ready for publication"
+    );
+    let mappings: BTreeMap<String, AcceptedMapping> =
+        serde_json::from_value(report["accepted_mappings"].clone())?;
     for name in ["nt.txt", "nt.scoped.txt", "method_nt.txt"] {
         fs::rename(format!("DUMP/{name}.partial"), format!("DUMP/{name}"))?;
     }
-    let path = "DUMP/nt-report.json";
-    let mut report: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
     report["status"] = "completed".into();
     let unresolved = report["counts"]["unresolved_candidate_groups"]
         .as_u64()
@@ -711,6 +746,42 @@ pub(crate) fn publish() -> anyhow::Result<()> {
         serde_json::to_vec_pretty(&report)?,
     )?;
     fs::rename("DUMP/nt-report.json.partial", path)?;
+    // Publication happens once, after proto and NT validation. Intermediate
+    // resolve passes must not announce candidates that may later be rolled back.
+    for (symbol, mapping) in mappings {
+        if mapping.kind == "field" {
+            log::info!(
+                "[NT] [field] {} -> {} [{symbol}]",
+                mapping.original,
+                mapping.name
+            );
+        } else {
+            log::info!(
+                "[NT] [{}] {} -> {}",
+                mapping.kind,
+                mapping.original,
+                mapping.name
+            );
+        }
+    }
+    if let Some(decisions) = report["decisions"].as_object() {
+        for (symbol, decision) in decisions {
+            let reason = decision["reason"].as_str().unwrap_or("");
+            if decision["selected"].is_null()
+                && (reason == "conflicting reliable names"
+                    || reason.starts_with("name collision in scope:"))
+            {
+                let names: BTreeSet<_> = decision["candidates"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|c| c["evidence"] != "hint")
+                    .filter_map(|c| c["name"].as_str())
+                    .collect();
+                log::warn!("[NT] [unresolved] {symbol}: {names:?}; {reason}");
+            }
+        }
+    }
     if unresolved != 0 {
         log::warn!("NT: {unresolved} unresolved candidate groups; details: {path}");
     }
@@ -724,6 +795,7 @@ pub(crate) fn begin() -> anyhow::Result<()> {
         inputs: BTreeMap::new(),
         notes: Vec::new(),
         decisions: BTreeMap::new(),
+        accepted_mappings: BTreeMap::new(),
         counts: BTreeMap::new(),
         error: None,
     })

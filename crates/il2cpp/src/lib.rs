@@ -27,8 +27,8 @@ pub static UP_BASE: LazyLock<usize> = LazyLock::new(|| unsafe {
         .0 as usize
 });
 pub static API_BASE_PTR: LazyLock<usize> = LazyLock::new(|| {
-    profile::supported()
-        .expect("invalid embedded client profile")
+    profile::current()
+        .expect("dynamic client discovery failed")
         .api_table_rva
 });
 pub static mut MAX_TYPEDEFINDEX: u32 = 0;

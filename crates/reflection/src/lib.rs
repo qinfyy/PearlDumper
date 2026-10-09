@@ -28,7 +28,7 @@ pub fn init_reflection_methods() -> anyhow::Result<()> {
     let started = Instant::now();
     log::info!("Initializing reflection bindings");
     il2cpp::api_table::assert_no_collisions();
-    il2cpp::api_table::bind_profile()?;
+    il2cpp::api_table::bind_dynamic()?;
     test_reflection_apis()?;
     let mut out = IndexMap::new();
     let type_count = unsafe { il2cpp::MAX_TYPEDEFINDEX };

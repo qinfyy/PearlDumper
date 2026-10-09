@@ -12,6 +12,7 @@ use il2cpp::{get_cached_class, get_native_method, vm::metadata_cache};
 use reflection::{property_info::PropertyInfo, runtime_type::RuntimeType};
 
 mod cache;
+mod discovery;
 mod fields;
 pub mod handler_nt;
 mod logic_nt;
@@ -261,7 +262,7 @@ fn dump_inner<W: Write>(
 
     let mut recovery = recovery::Recovery::new(&type_to_item, &core_names)?;
     recovery.add(std::mem::take(&mut request_scan.name_hints));
-    log::info!("Recovering protocol names and field names from HSR-OWNER handlers");
+    log::info!("Recovering protocol names and field names from handlers");
     let (method_handler_map, method_nt_map) = method_nt::get_method_nt_map()
         .context("protocol name recovery failed; verified core protocol files are retained")?;
     recovery.add(method_nt_map);

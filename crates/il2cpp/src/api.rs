@@ -4,8 +4,8 @@ use crate::vm::domain::Il2CppDomain;
 
 pub const REQUIRED_SLOTS: &[usize] = &[
     14, 18, 22, 31, 32, 33, 34, 35, 36, 37, 39, 40, 41, 42, 43, 45, 46, 47, 48, 49, 51, 53, 54, 55,
-    56, 57, 63, 64, 65, 73, 75, 76, 77, 116, 117, 122, 123, 124, 125, 128, 129, 130, 131, 132, 140,
-    154, 161, 162, 163, 164, 165, 168, 169, 170,
+    56, 57, 63, 64, 65, 72, 73, 75, 76, 77, 116, 117, 122, 123, 124, 125, 128, 129, 130, 131, 132,
+    140, 154, 161, 162, 163, 164, 165, 168, 169, 170,
 ];
 
 pub fn function_address(index: usize) -> anyhow::Result<usize> {
@@ -206,6 +206,7 @@ il2cpp_api!(63, il2cpp_domain_get() -> Il2CppDomain);
 il2cpp_api!(64, il2cpp_domain_assembly_open(domain: Il2CppDomain, name: *const i8) -> Il2CppAssembly);
 il2cpp_api!(65, il2cpp_domain_get_assemblies(domain: Il2CppDomain, size: *mut usize) -> *mut Il2CppAssembly);
 il2cpp_api!(73, il2cpp_field_get_name(field: Il2CppField) -> *const i8);
+il2cpp_api!(72, il2cpp_field_get_flags(field: Il2CppField) -> i32);
 il2cpp_api!(75, il2cpp_field_get_offset(field: Il2CppField) -> usize);
 il2cpp_api!(76, il2cpp_field_get_type(field: Il2CppField) -> Il2CppType);
 il2cpp_api!(77, il2cpp_field_get_value_object(field: Il2CppField, obj: Il2CppObject) -> Il2CppObject);

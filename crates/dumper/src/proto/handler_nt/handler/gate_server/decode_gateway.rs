@@ -49,7 +49,7 @@ pub fn run() -> Hints {
                     continue;
                 };
                 let deobf_name = if is_ip(&s) {
-                    "GateServerAddress"
+                    "ip"
                 } else if is_ec2b(&s) {
                     "client_secret_key"
                 } else if s.contains("/asb/") {
@@ -99,6 +99,7 @@ pub fn run() -> Hints {
         map.insert(obf_name.clone(), final_name);
     }
 
+    map.advisory("gateway values and URL patterns are observations, not native field identity");
     map
 }
 

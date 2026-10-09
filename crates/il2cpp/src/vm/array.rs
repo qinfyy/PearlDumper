@@ -71,6 +71,36 @@ impl Il2CppArray {
         self.as_slice::<T>().to_vec()
     }
 
+    pub fn try_to_vec<T: Copy>(self) -> anyhow::Result<Vec<T>> {
+        use anyhow::{Context, ensure};
+        ensure!(self.0 != 0, "null managed array");
+        ensure!(size_of::<T>() != 0, "zero-sized managed array element");
+        let length_address = self
+            .0
+            .checked_add(24)
+            .context("array length address overflow")?;
+        let length = unsafe { utils::memory::read::<usize>(length_address) }?;
+        let size = length
+            .checked_mul(size_of::<T>())
+            .context("array size overflow")?;
+        ensure!(
+            size <= isize::MAX as usize,
+            "array exceeds Rust slice limit"
+        );
+        if length == 0 {
+            return Ok(Vec::new());
+        }
+        let address = self
+            .0
+            .checked_add(32)
+            .context("array data address overflow")?;
+        let bytes = unsafe { utils::memory::read_bytes(address, size) }?;
+        Ok(bytes
+            .chunks_exact(size_of::<T>())
+            .map(|chunk| unsafe { std::ptr::read_unaligned(chunk.as_ptr() as *const T) })
+            .collect())
+    }
+
     fn checked_len<T>(&self) -> usize {
         let length = self.len();
         let size = length

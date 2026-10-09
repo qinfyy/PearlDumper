@@ -148,7 +148,7 @@ pub const PARAM_NT_MAP: &[(&str, &str, &str, ExtractMode)] = &[
     (
         "RPG.Client.AdventureModule",
         "_InitSnapshotContext",
-        "SnapShot",
+        "PerformanceStartSnapshot",
         ExtractMode::FirstParam,
     ),
     (
@@ -825,21 +825,23 @@ pub const PARAM_NT_MAP: &[(&str, &str, &str, ExtractMode)] = &[
     ),
     (
         "RPG.Client.GridFightAugmentSelection",
-        "Update",
+        ".ctor",
         "GridFightAugmentActionInfo",
-        ExtractMode::FirstParam,
+        // Update now accepts the outer pending-action oneof; the payload ctor
+        // remains (augment info, uint action id) in both observed clients.
+        ExtractMode::FirstParamBeforeUInt32,
     ),
     (
         "RPG.Client.GridFightRecommendEquipSelection",
-        "Update",
+        ".ctor",
         "GridFightRecommendEquipmentActionInfo",
-        ExtractMode::FirstParam,
+        ExtractMode::FirstParamBeforeUInt32,
     ),
     (
         "RPG.Client.GridFightForgeRoleSelectionAction",
-        "Update",
+        ".ctor",
         "GridFightForgeRoleActionInfo",
-        ExtractMode::FirstParam,
+        ExtractMode::FirstParamBeforeUInt32,
     ),
     (
         "RPG.Client.GridFightTraitEnhanceChooseAction",
@@ -947,7 +949,7 @@ pub const PARAM_NT_MAP: &[(&str, &str, &str, ExtractMode)] = &[
         "RPG.Client.ActivityMarble.MarblePVPManager",
         "_CreateExtInfo",
         "LobbyGameExtInfo",
-        ExtractMode::ReturnType,
+        ExtractMode::ReturnTypeNoArgsInHierarchy,
     ),
     (
         "RPG.Client.FiveDimModule",

@@ -4,9 +4,7 @@ use std::{
 };
 
 use anyhow::Context;
-use iced_x86::{
-    Decoder, DecoderOptions, InstructionInfoFactory, Mnemonic, OpAccess, OpKind, Register,
-};
+use iced_x86::{Decoder, DecoderOptions, FlowControl, Register};
 use il2cpp::{FUNCTIONS_TABLE_REFLECTION, GA_BASE, vm::class::Il2CppClass};
 use reflection::runtime_type::RuntimeType;
 use utils::scanner::{
@@ -15,7 +13,7 @@ use utils::scanner::{
 
 use super::{
     MessageMinimalInfo, native,
-    recovery::{Evidence, Hints},
+    recovery::{Evidence, Hints, response, response_names},
     runtime::{PacketRegistry, ProtocolRuntime},
     type_references::TypeReferences,
 };
@@ -179,9 +177,28 @@ pub(super) fn get_rsp_notify_names(
         .keys()
         .map(|&ty| (ty.get_il2cpp_type().get_class(), ty))
         .collect();
-    let mut candidates: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let strings = ResponseStrings::new();
+    let loggers = [
+        ("RPG.SuperDebug::LogError(System.String)", Register::RCX),
+        (
+            "RPG.SuperDebug::LogError(RPG.LogTag,System.String)",
+            Register::RDX,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(signature, argument)| {
+        let method = methods.get(signature)?;
+        Some((*GA_BASE + method.checked_rva().ok()?, argument))
+    })
+    .collect();
+    let mut hints = Hints::new();
+    let mut helper_cache = HashMap::new();
     for (signature, method) in methods {
         if !signature.ends_with("(System.UInt16,System.Object)") {
+            continue;
+        }
+        if !reflection::method_info::MethodInfo::from_handle(*method).is_ok_and(|m| !m.is_static())
+        {
             continue;
         }
         let method_name = method.get_name();
@@ -197,40 +214,110 @@ pub(super) fn get_rsp_notify_names(
         let Ok(rva) = method.checked_rva() else {
             continue;
         };
-        let ty = match by_rva.get(&rva).filter(|types| types.len() == 1) {
-            Some(types) => types.iter().next().copied(),
-            None => {
-                let Ok(bytes) = game_assembly_function(rva) else {
-                    continue;
-                };
-                scan.runtime.initialize_references(rva, bytes)?;
-                response_type(bytes, *GA_BASE + rva, &scan.references, &response_classes)
-            }
+        let Ok(bytes) = game_assembly_function(rva) else {
+            continue;
         };
+        scan.runtime.initialize_references(rva, bytes)?;
+        let no_return = Decoder::with_ip(64, bytes, (*GA_BASE + rva) as u64, DecoderOptions::NONE)
+            .into_iter()
+            .filter(|i| i.flow_control() == FlowControl::Call)
+            .filter_map(|i| native::direct_target(&i))
+            .filter(|&address| {
+                *helper_cache.entry(address).or_insert_with(|| {
+                    let Some(rva) = address.checked_sub(*GA_BASE) else {
+                        return false;
+                    };
+                    let Ok(table) = game_assembly_functions() else {
+                        return false;
+                    };
+                    let Some(range) = table.containing(rva) else {
+                        return false;
+                    };
+                    range.start as usize == rva
+                        && range.end - range.start <= 4096
+                        && game_assembly_function(rva)
+                            .is_ok_and(|b| response::trap_terminated(b, address))
+                })
+            })
+            .collect();
+        let analysis = response::analyze(
+            bytes,
+            *GA_BASE + rva,
+            Register::R8,
+            |slot| {
+                scan.references
+                    .class_from_slot(slot)
+                    .filter(|c| response_classes.contains_key(c))
+                    .map(|c| c.0)
+            },
+            |slot| strings.as_ref()?.read(slot),
+            &loggers,
+            &no_return,
+        )
+        .ok();
+        let registered = by_rva
+            .get(&rva)
+            .filter(|types| types.len() == 1)
+            .and_then(|types| types.iter().next().copied());
+        let observed = analysis
+            .as_ref()
+            .filter(|a| a.classes.len() == 1)
+            .and_then(|a| {
+                response_classes
+                    .get(&Il2CppClass(*a.classes.first().unwrap()))
+                    .copied()
+            });
+        if registered.is_some_and(|ty| {
+            analysis.as_ref().is_some_and(|a| {
+                a.classes
+                    .iter()
+                    .any(|&c| c != ty.get_il2cpp_type().get_class().0)
+            })
+        }) {
+            log::debug!("Response registry/cast disagreement at RVA 0x{rva:X}");
+            continue;
+        }
+        let ty = registered.or(observed);
         if let Some(ty) = ty {
             let name = name
                 .strip_suffix("ScRep")
                 .map(|s| format!("{s}ScRsp"))
                 .unwrap_or_else(|| name.to_owned());
-            scan.name_hints.context(signature.clone(), rva);
-            scan.name_hints
-                .insert(ty.format_type_name(true), name.clone());
-            if name.ends_with("ScRsp") || name.ends_with("ScNotify") {
-                candidates
-                    .entry(ty.format_type_name(true))
-                    .or_default()
-                    .insert(name);
-            } else {
-                scan.name_hints.entries.last_mut().unwrap().evidence = Evidence::Hint;
+            hints.context(signature.clone(), rva);
+            hints.insert(ty.format_type_name(true), name.clone());
+            if !name.ends_with("ScRsp") && !name.ends_with("ScNotify") {
+                hints.entries.last_mut().unwrap().evidence = Evidence::Hint;
+            }
+            let diagnostics: Vec<_> = analysis
+                .as_ref()
+                .into_iter()
+                .flat_map(|a| &a.diagnostics)
+                .filter(|d| d.class == ty.get_il2cpp_type().get_class().0)
+                .filter_map(|d| response_names::diagnostic_name(&d.literal, &name).map(|n| (n, d)))
+                .collect();
+            if !diagnostics.is_empty() {
+                let callback = hints.entries.last_mut().unwrap();
+                callback.evidence = Evidence::Hint;
+                callback
+                    .source
+                    .push_str("; callback abbreviation superseded by failed-cast diagnostic");
+                for (resolved, d) in diagnostics {
+                    hints.insert(ty.format_type_name(true), resolved);
+                    let c = hints.entries.last_mut().unwrap();
+                    c.original_name = Some(name.clone());
+                    c.source = format!(
+                        "response argument CFG cast/null failure -> LogError; literal slot RVA 0x{:X}; call RVA 0x{:X}; {:?}",
+                        d.slot - *GA_BASE,
+                        d.call - *GA_BASE,
+                        d.literal
+                    );
+                }
             }
         }
     }
-    let mut result = HashMap::new();
-    for (ty, names) in candidates {
-        if names.len() == 1 {
-            result.insert(ty, names.into_iter().next().unwrap());
-        }
-    }
+    response_names::normalize(&mut hints);
+    let result = hints.unique();
+    scan.name_hints.extend(hints);
     log::info!(
         "Recovered {} response/notification names from verified handlers",
         result.len()
@@ -238,103 +325,58 @@ pub(super) fn get_rsp_notify_names(
     Ok(result)
 }
 
-fn response_type(
-    bytes: &[u8],
-    ip: usize,
-    references: &TypeReferences,
-    responses: &HashMap<Il2CppClass, RuntimeType>,
-) -> Option<RuntimeType> {
-    let mut objects = HashSet::from([Register::R8]);
-    let mut object_classes = HashSet::new();
-    let mut known_classes = HashMap::new();
-    let mut candidates = HashSet::new();
-    let mut info = InstructionInfoFactory::new();
-    for instruction in Decoder::with_ip(64, bytes, ip as u64, DecoderOptions::NONE) {
-        if instruction.is_invalid() {
+struct ResponseStrings {
+    class: Il2CppClass,
+    length: usize,
+    chars: usize,
+}
+
+impl ResponseStrings {
+    fn new() -> Option<Self> {
+        let class = il2cpp::get_cached_class("System.String")?;
+        let ty = RuntimeType::from_class(class).ok()?;
+        let fields = ty.get_fields_il2cpp();
+        let offset = |name: &str, kind: &str| {
+            let matches: Vec<_> = fields
+                .iter()
+                .filter(|f| {
+                    f.is_instance()
+                        && f.get_name().is_ok_and(|n| n.as_str() == name)
+                        && f.get_field_type().is_ok_and(|t| t.il_name() == kind)
+                })
+                .collect();
+            let [field] = matches.as_slice() else {
+                return None;
+            };
+            usize::try_from(field.get_offset()).ok()
+        };
+        Some(Self {
+            class,
+            length: offset("m_stringLength", "System.Int32")?,
+            chars: offset("m_firstChar", "System.Char")?,
+        })
+    }
+
+    fn read(&self, slot: usize) -> Option<String> {
+        use utils::memory::{read, read_bytes};
+        let offset = slot.checked_sub(*GA_BASE)?;
+        if offset.checked_add(8)? > il2cpp::profile::current().ok()?.assembly.image_size as usize {
             return None;
         }
-        if instruction.mnemonic() == Mnemonic::Cmp {
-            let left = instruction.op0_register();
-            let right = instruction.op1_register();
-            let class = if object_classes.contains(&left) {
-                if instruction.op1_kind() == OpKind::Memory
-                    && instruction.is_ip_rel_memory_operand()
-                {
-                    references.class_from_slot(instruction.ip_rel_memory_address() as usize)
-                } else {
-                    known_classes.get(&right).copied()
-                }
-            } else if object_classes.contains(&right) {
-                known_classes.get(&left).copied()
-            } else {
-                None
-            };
-            if let Some(ty) = class.and_then(|class| responses.get(&class)) {
-                candidates.insert(*ty);
-            }
+        let pointer = unsafe { read::<usize>(slot) }.ok()?;
+        if unsafe { read::<Il2CppClass>(pointer) }.ok()? != self.class {
+            return None;
         }
-
-        let is_move =
-            instruction.mnemonic() == Mnemonic::Mov && instruction.op0_kind() == OpKind::Register;
-        let source = instruction.op1_register();
-        let object_copy =
-            is_move && instruction.op1_kind() == OpKind::Register && objects.contains(&source);
-        let class_copy = is_move
-            && instruction.op1_kind() == OpKind::Register
-            && object_classes.contains(&source);
-        let dereference = is_move
-            && instruction.op1_kind() == OpKind::Memory
-            && objects.contains(&instruction.memory_base())
-            && instruction.memory_index() == Register::None
-            && instruction.memory_displacement64() == 0
-            && instruction.memory_size().size() == 8;
-        let loaded_class = references.class_from_load(&instruction).or_else(|| {
-            is_move
-                .then(|| known_classes.get(&source).copied())
-                .flatten()
-        });
-
-        for used in info.info(&instruction).used_registers() {
-            if matches!(
-                used.access(),
-                OpAccess::Write
-                    | OpAccess::CondWrite
-                    | OpAccess::ReadWrite
-                    | OpAccess::ReadCondWrite
-            ) {
-                let reg = used.register().full_register();
-                objects.remove(&reg);
-                object_classes.remove(&reg);
-                known_classes.remove(&reg);
-            }
+        let length = unsafe { read::<i32>(pointer.checked_add(self.length)?) }.ok()?;
+        if !(1..=256).contains(&length) {
+            return None;
         }
-        if instruction.mnemonic() == Mnemonic::Call {
-            for reg in [
-                Register::RAX,
-                Register::RCX,
-                Register::RDX,
-                Register::R8,
-                Register::R9,
-                Register::R10,
-                Register::R11,
-            ] {
-                objects.remove(&reg);
-                object_classes.remove(&reg);
-                known_classes.remove(&reg);
-            }
-        }
-        if is_move && instruction.op0_register().is_gpr64() {
-            let destination = instruction.op0_register();
-            if object_copy {
-                objects.insert(destination);
-            }
-            if class_copy || dereference {
-                object_classes.insert(destination);
-            }
-            if let Some(class) = loaded_class {
-                known_classes.insert(destination, class);
-            }
-        }
+        let bytes =
+            unsafe { read_bytes(pointer.checked_add(self.chars)?, length as usize * 2) }.ok()?;
+        let chars: Vec<_> = bytes
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        String::from_utf16(&chars).ok()
     }
-    (candidates.len() == 1).then(|| *candidates.iter().next().unwrap())
 }

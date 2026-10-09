@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 
-use iced_x86::{Instruction, Mnemonic, OpKind};
 use il2cpp::vm::class::Il2CppClass;
 
 pub(super) struct TypeReferences {
@@ -25,31 +24,9 @@ impl TypeReferences {
         anyhow::ensure!(!classes.is_empty(), "IL2CPP class cache is empty");
         Ok(Self::new(
             *il2cpp::GA_BASE,
-            il2cpp::profile::supported()?.assembly.image_size as usize,
+            il2cpp::profile::current()?.assembly.image_size as usize,
             classes.iter().copied(),
         ))
-    }
-
-    pub fn slot_address(&self, instruction: &Instruction) -> Option<usize> {
-        if instruction.mnemonic() != Mnemonic::Mov
-            || instruction.op0_kind() != OpKind::Register
-            || !instruction.op0_register().is_gpr64()
-            || instruction.op1_kind() != OpKind::Memory
-            || !instruction.is_ip_rel_memory_operand()
-        {
-            return None;
-        }
-        let address = usize::try_from(instruction.ip_rel_memory_address()).ok()?;
-        let offset = address.checked_sub(self.base)?;
-        if offset.checked_add(size_of::<usize>())? > self.size {
-            return None;
-        }
-        Some(address)
-    }
-
-    pub fn class_from_load(&self, instruction: &Instruction) -> Option<Il2CppClass> {
-        let address = self.slot_address(instruction)?;
-        self.class_from_slot(address)
     }
 
     pub fn class_from_slot(&self, address: usize) -> Option<Il2CppClass> {

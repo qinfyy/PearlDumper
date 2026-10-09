@@ -11,7 +11,7 @@ pub fn init_il2cpp(debug: bool) -> anyhow::Result<()> {
         return Ok(());
     }
     let started = Instant::now();
-    crate::profile::validate_loaded_client()?;
+    crate::profile::current()?;
     let domain = api::wait_until_ready(Duration::from_secs(120))?;
     unsafe {
         log::info!("Attaching dump worker to IL2CPP domain 0x{:X}", domain.0);

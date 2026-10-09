@@ -88,6 +88,10 @@ impl ModuleSnapshot {
     }
 
     fn scan(&self, pattern: &str) -> Option<usize> {
+        resolve_relative(&self.bytes, self.find_unique(pattern)?)
+    }
+
+    fn find_unique(&self, pattern: &str) -> Option<usize> {
         let mut found = None;
         for region in &self.executable {
             let mut offset = region.start;
@@ -103,7 +107,7 @@ impl ModuleSnapshot {
                 offset = address + 1;
             }
         }
-        resolve_relative(&self.bytes, found?)
+        found
     }
 }
 
@@ -151,12 +155,11 @@ pub fn game_assembly_functions() -> anyhow::Result<&'static crate::pe::FunctionT
 }
 
 pub fn game_assembly_function(rva: usize) -> anyhow::Result<&'static [u8]> {
-    let range = game_assembly_functions()?
-        .containing(rva)
-        .ok_or_else(|| anyhow::anyhow!("no native function contains RVA 0x{rva:X}"))?;
-    game_assembly_slice()
-        .get(rva..range.end as usize)
-        .ok_or_else(|| anyhow::anyhow!("native function outside GameAssembly: 0x{rva:X}"))
+    game_assembly_functions()?.function_bytes(game_assembly_slice(), rva)
+}
+
+pub fn game_assembly_candidate(rva: usize) -> anyhow::Result<Option<&'static [u8]>> {
+    game_assembly_functions()?.candidate_bytes(game_assembly_slice(), rva)
 }
 
 pub fn scan_ga_section(pattern: &str) -> Option<usize> {
@@ -169,6 +172,109 @@ pub fn unity_player_slice() -> &'static [u8] {
 
 pub fn scan_unity_player_section(pattern: &str) -> Option<usize> {
     unity_player().scan(pattern)
+}
+
+pub fn unity_api_table_rva() -> anyhow::Result<usize> {
+    let found = find_unity_api_table(&unity_player().bytes)?;
+    log::debug!(
+        "Unity init call +0x{:X}: MOV loads API table +0x{:X}; LEA passes domain string +0x{:X}",
+        found.reference_rva,
+        found.table_rva,
+        found.domain_name_rva
+    );
+    Ok(found.table_rva)
+}
+
+#[derive(Debug)]
+pub struct UnityApiTable {
+    pub reference_rva: usize,
+    pub table_rva: usize,
+    pub domain_name_rva: usize,
+}
+
+// Shared with offline replay: MOV loads table[0], LEA supplies the domain name.
+pub fn find_unity_api_table(image: &[u8]) -> anyhow::Result<UnityApiTable> {
+    let sections = crate::pe::mapped_sections(image)?;
+    let functions = crate::pe::FunctionTable::from_mapped_pe(image)?;
+    let mut accepted = Vec::new();
+    let mut rejected = Vec::new();
+    for section in sections
+        .iter()
+        .filter(|s| s.characteristics & 0x2000_0000 != 0)
+    {
+        let mut cursor = section.range.start;
+        while cursor < section.range.end {
+            let Some(local) = scan_first_match(
+                &mut &image[cursor..section.range.end],
+                "48 8B 05 ? ? ? ? 48 8D 0D ? ? ? ? FF D0",
+            )?
+            else {
+                break;
+            };
+            let reference = cursor + local;
+            cursor = reference + 1;
+            let candidate = (|| -> anyhow::Result<UnityApiTable> {
+                let function = functions
+                    .containing(reference)
+                    .ok_or_else(|| anyhow::anyhow!("call site has no function boundary"))?;
+                anyhow::ensure!(
+                    reference + 16 <= function.end as usize,
+                    "call crosses function boundary"
+                );
+                let table_rva = resolve_relative(image, reference)
+                    .ok_or_else(|| anyhow::anyhow!("invalid MOV target"))?;
+                validate_unity_api_storage(image, table_rva)?;
+                let domain_name_rva = resolve_relative(image, reference + 7)
+                    .ok_or_else(|| anyhow::anyhow!("invalid LEA argument"))?;
+                let name = b"IL2CPP Root Domain\0";
+                anyhow::ensure!(
+                    image.get(domain_name_rva..domain_name_rva + name.len()) == Some(name),
+                    "call argument is not the IL2CPP root domain name"
+                );
+                anyhow::ensure!(
+                    sections.iter().any(|s| s.range.contains(&domain_name_rva)
+                        && domain_name_rva + name.len() <= s.range.end
+                        && s.characteristics & 0xE000_0000 == 0x4000_0000),
+                    "domain name is not in read-only data"
+                );
+                Ok(UnityApiTable {
+                    reference_rva: reference,
+                    table_rva,
+                    domain_name_rva,
+                })
+            })();
+            match candidate {
+                Ok(found) => accepted.push(found),
+                Err(error) => rejected.push(format!("0x{reference:X}: {error:#}")),
+            }
+        }
+    }
+    anyhow::ensure!(
+        accepted.len() == 1,
+        "expected one validated Unity API table, found {}; rejected: {}",
+        accepted.len(),
+        rejected.join("; ")
+    );
+    Ok(accepted.remove(0))
+}
+
+pub fn validate_unity_api_storage(image: &[u8], rva: usize) -> anyhow::Result<()> {
+    let end = rva
+        .checked_add(171 * 8)
+        .ok_or_else(|| anyhow::anyhow!("API table overflow"))?;
+    anyhow::ensure!(
+        rva.is_multiple_of(8) && end <= image.len(),
+        "API table outside image or unaligned"
+    );
+    anyhow::ensure!(
+        crate::pe::mapped_sections(image)?
+            .iter()
+            .any(|s| rva >= s.range.start
+                && end <= s.range.end
+                && s.characteristics & 0xE000_0000 == 0xC000_0000),
+        "API table +0x{rva:X} is not fully in readable/writable, non-executable storage"
+    );
+    Ok(())
 }
 
 fn xluau() -> &'static ModuleSnapshot {

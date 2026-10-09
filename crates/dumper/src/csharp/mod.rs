@@ -1,471 +1,428 @@
-use std::{borrow::Cow, collections::HashMap, fs::File, io::Write as _};
+mod types;
 
-use il2cpp::MAX_TYPEDEFINDEX;
-use il2cpp::vm::value::Il2CppValue;
-use reflection::{
-    attributes::{MethodAttributes, TypeAttributes},
-    custom_attribute::format_custom_atrributes,
-    event_info::EventInfo,
-    field_info::FieldInfo,
-    method_info::MethodInfo,
-    property_info::PropertyInfo,
-    runtime_type::RuntimeType,
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write as FmtWrite,
+    fs::{self, File},
+    io::{BufWriter, Write as IoWrite},
+    time::{Duration, Instant},
 };
 
-use crate::script::METADATA_METHODS;
+use anyhow::{Context, Result, ensure};
+use il2cpp::{
+    api,
+    vm::{class::Il2CppClass, method::Il2CppMethod},
+};
+use reflection::attributes::{FieldAttributes, MethodAttributes, TypeAttributes};
 
-#[allow(unused)]
-pub fn dump(debug: bool) -> std::io::Result<()> {
-    unsafe {
-        log::debug!("[C# Dumper] dumping full cs...");
-        let mut file = File::create("./DUMP/dump.cs").expect("Failed to create dump.reflection.cs");
+use self::types::Types;
 
-        writeln!(
-            file,
-            "// Dumped with hsr-dumping-skull | Game Version: {}\n",
-            *crate::version::GAME_VERSION
-        );
-
-        let assemblies = reflection::assembly::get_assemblies();
-        for (i, asm) in assemblies.iter().enumerate() {
-            writeln!(
-                file,
-                "// Assembly {i}: {}",
-                asm.get_full_name().map(|v| v.as_str()).unwrap_or_default()
-            )?;
-        }
-        writeln!(file)?;
-
-        let mut current_assembly_name = Cow::Borrowed("");
-        let mut type_index_in_assembly = 0;
-        let mut assembly_index = 0;
-
-        let metadata_methods = METADATA_METHODS.get().unwrap();
-
-        for typedef_index in 0..MAX_TYPEDEFINDEX {
-            let class = il2cpp::vm::metadata_cache::get_typeinfo_from_typedefindex(typedef_index);
-
-            let runtime_type = RuntimeType::from_class(class).unwrap();
-
-            if debug {
-                log::debug!(
-                    "[C# Dumper] ({}) {}",
-                    typedef_index,
-                    runtime_type
-                        .get_name()
-                        .map(|v| v.as_str())
-                        .unwrap_or_default()
-                );
-            }
-
-            let namespace = class.get_namespace();
-            let full_name = class.byval_arg().full_name();
-            let new_assembly_name = runtime_type.get_assembly().unwrap().get_name() + ".dll";
-            if current_assembly_name != new_assembly_name {
-                assembly_index += 1;
-                type_index_in_assembly = 0;
-                current_assembly_name = new_assembly_name;
-            } else {
-                type_index_in_assembly += 1;
-            }
-
-            let class_str = format_type_to_csharp(&runtime_type, metadata_methods);
-            let capacity = 100
-                + typedef_index.to_string().len()
-                + current_assembly_name.len()
-                + namespace.len()
-                + full_name.len()
-                + class_str.len();
-
-            let mut out = String::with_capacity(capacity);
-
-            out.push_str("// AssemblyIndex: ");
-            out.push_str(&assembly_index.to_string());
-            out.push_str(" TypeIndexInAssembly: ");
-            out.push_str(&type_index_in_assembly.to_string());
-            out.push('\n');
-            out.push_str("// TypeDefIndex: ");
-            out.push_str(&typedef_index.to_string());
-            out.push('\n');
-            out.push_str("// Module: ");
-            out.push_str(&current_assembly_name);
-            out.push('\n');
-            out.push_str("// Namespace: ");
-            out.push_str(namespace.as_ref());
-            out.push('\n');
-            out.push_str("// FullName: ");
-            out.push_str(full_name.as_ref());
-            out.push('\n');
-            out.push_str(&class_str);
-            out.push('\n');
-
-            file.write_all(out.as_bytes())?;
-        }
-
-        log::debug!("[C# Dumper] Done");
-
-        Ok(())
-    }
+#[derive(Default)]
+struct Stats {
+    types: usize,
+    empty_type_names: usize,
+    fields: usize,
+    methods: usize,
+    constructors: usize,
+    fields_time: Duration,
+    methods_time: Duration,
 }
 
-fn type_modifier(ty: &RuntimeType) -> String {
-    let attributes = ty.get_attributes().unwrap().unbox();
-    let visibility = attributes & TypeAttributes::VisibilityMask;
+pub fn dump() -> Result<()> {
+    let started = Instant::now();
+    let classes = il2cpp::CLASS_TABLE_VEC
+        .get()
+        .context("type cache is not initialized")?;
+    let total = classes.len();
+    let mut names = Types::new()?;
+    let assembly_base = *il2cpp::GA_BASE;
+    let assembly_size = il2cpp::profile::current()?.assembly.image_size as usize;
+    let partial = "DUMP/dump.cs.partial";
+    let final_name = "DUMP/dump.cs";
+    let file = File::create(partial).with_context(|| format!("creating {partial}"))?;
+    let mut out = BufWriter::with_capacity(1024 * 1024, file);
+    writeln!(out, "// Castorice Dumper native C# export")?;
+    writeln!(
+        out,
+        "// Types, fields and methods; native metadata names are preserved.\n"
+    )?;
 
-    let mut ret = String::from(match visibility {
+    let mut stats = Stats::default();
+    let mut seen = HashSet::with_capacity(total);
+    let mut assemblies = HashMap::new();
+    let mut body = String::with_capacity(16 * 1024);
+    let mut last_progress = started;
+    let mut last_index = 0;
+    log::info!(
+        "Csharp native export: {total} type definitions; types/fields/methods only, no managed reflection"
+    );
+
+    for (index, &class) in classes.iter().enumerate() {
+        if index == 0 || last_progress.elapsed() >= Duration::from_secs(2) {
+            let speed =
+                (index - last_index) as f64 / last_progress.elapsed().as_secs_f64().max(0.001);
+            let remaining = if speed > 0.0 {
+                (total - index) as f64 / speed
+            } else {
+                0.0
+            };
+            log::info!(
+                "Csharp native export: {index}/{total}, types={}, fields={}, methods={}, constructors={}, {:.0} types/s, {:.1}s elapsed, ETA {:.1}s, next class=0x{:X}",
+                stats.types,
+                stats.fields,
+                stats.methods,
+                stats.constructors,
+                speed,
+                started.elapsed().as_secs_f64(),
+                remaining,
+                class.0
+            );
+            last_progress = Instant::now();
+            last_index = index;
+        }
+        ensure!(class.0 != 0, "null class for typedef index {index}");
+        if !seen.insert(class.0) {
+            continue;
+        }
+        let type_started = Instant::now();
+        let fields_before = stats.fields_time;
+        let methods_before = stats.methods_time;
+        let image = class.get_image();
+        ensure!(
+            image.0 != 0,
+            "typedef {index}, class=0x{:X}: null image",
+            class.0
+        );
+        let assembly = assemblies
+            .entry(image.0)
+            .or_insert_with(|| image.get_name().into_owned());
+        let namespace = class.get_namespace();
+        let type_name = class.get_name();
+        let type_name = if type_name.is_empty() {
+            stats.empty_type_names += 1;
+            log::warn!(
+                "Csharp empty class name: {assembly}: typedef {index}, class=0x{:X}; writing \"\" and preserving members",
+                class.0
+            );
+            "\"\""
+        } else {
+            type_name.as_ref()
+        };
+        body.clear();
+        writeln!(body, "// TypeDefIndex: {index}")?;
+        writeln!(body, "// Assembly: {assembly}")?;
+        writeln!(body, "// Namespace: {namespace}")?;
+        render_type(
+            class,
+            type_name,
+            &mut names,
+            &mut stats,
+            &mut body,
+            assembly_base,
+            assembly_size,
+        )
+        .with_context(|| {
+            format!(
+                "{assembly}: typedef {index} {namespace}.{type_name}, class=0x{:X}",
+                class.0
+            )
+        })?;
+        out.write_all(body.as_bytes())?;
+        if type_started.elapsed() >= Duration::from_secs(1) {
+            log::warn!(
+                "Csharp slow type: {assembly}: {namespace}.{type_name}, class=0x{:X}, {:.2}s, fields {:.2}s / methods {:.2}s",
+                class.0,
+                type_started.elapsed().as_secs_f64(),
+                (stats.fields_time - fields_before).as_secs_f64(),
+                (stats.methods_time - methods_before).as_secs_f64()
+            );
+        }
+    }
+    out.flush()?;
+    out.get_ref().sync_all()?;
+    drop(out);
+    fs::rename(partial, final_name).with_context(|| format!("publishing {final_name}"))?;
+    log::info!(
+        "Csharp native export complete: types={}, empty type names={}, fields={}, constructors={}, methods={}, cached names={}, memory queries={}, fields {:.2}s, methods {:.2}s, total {:.2}s",
+        stats.types,
+        stats.empty_type_names,
+        stats.fields,
+        stats.constructors,
+        stats.methods,
+        names.cached_names(),
+        names.memory.query_count(),
+        stats.fields_time.as_secs_f64(),
+        stats.methods_time.as_secs_f64(),
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+fn render_type(
+    class: Il2CppClass,
+    type_name: &str,
+    names: &mut Types,
+    stats: &mut Stats,
+    out: &mut String,
+    assembly_base: usize,
+    assembly_size: usize,
+) -> Result<()> {
+    let attrs = TypeAttributes::from_bits_retain(class.get_flags());
+    let is_enum = class.is_enum();
+    let is_value = class.is_valuetype();
+    if attrs.contains(TypeAttributes::Serializable) {
+        out.push_str("[Serializable]\n");
+    }
+    type_modifier(attrs, is_enum, is_value, out);
+    out.push_str(type_name);
+    let mut has_parent = false;
+    let base = class.get_parent();
+    if !is_value && !is_enum && base.0 != 0 {
+        let name = names.name(base.byval_arg())?;
+        if name != "object" {
+            write!(out, " : {name}")?;
+            has_parent = true;
+        }
+    }
+    for interface in class.get_interfaces() {
+        ensure!(interface.0 != 0, "null interface");
+        write!(
+            out,
+            "{}{}",
+            if has_parent { ", " } else { " : " },
+            names.name(interface.byval_arg())?
+        )?;
+        has_parent = true;
+    }
+    out.push_str("\n{\n\t// Fields\n");
+    let fields_started = Instant::now();
+    let mut iter = std::ptr::null();
+    let mut count = 0;
+    loop {
+        let field = api::il2cpp_class_get_fields(class, &mut iter);
+        if field.0 == 0 {
+            break;
+        }
+        count += 1;
+        ensure!(count <= 65536, "field iteration did not terminate");
+        let field_name = field.get_name();
+        let attrs = FieldAttributes::from_bits_retain(field.get_flags());
+        let mut offset = field.offset();
+        if is_value
+            && !attrs.intersects(FieldAttributes::Static | FieldAttributes::Literal)
+            && offset > 0
+        {
+            offset = offset
+                .checked_sub(16)
+                .context("value-type field offset precedes object header")?;
+        }
+        out.push('\t');
+        field_modifier(attrs, out);
+        let ty = names.name(field.get_type()).with_context(|| {
+            format!(
+                "field {field_name}, handle=0x{:X}, offset=0x{offset:X}",
+                field.0
+            )
+        })?;
+        writeln!(out, "{ty} {field_name}; // Offset: 0x{offset:X}")?;
+        stats.fields += 1;
+    }
+    stats.fields_time += fields_started.elapsed();
+
+    out.push_str("\n\t// Methods\n");
+    let methods_started = Instant::now();
+    let mut iter = std::ptr::null();
+    let mut count = 0;
+    loop {
+        let method = api::il2cpp_class_get_methods(class, &mut iter);
+        if method.0 == 0 {
+            break;
+        }
+        count += 1;
+        ensure!(count <= 65536, "method iteration did not terminate");
+        let method_name = method.get_name();
+        let va = method
+            .try_va_cached(&mut names.memory)
+            .with_context(|| format!("method {method_name}, handle=0x{:X}: address", method.0))?;
+        render_method(
+            method,
+            method_name.as_ref(),
+            type_name,
+            va,
+            names,
+            out,
+            assembly_base,
+            assembly_size,
+        )
+        .with_context(|| {
+            format!(
+                "method {method_name}, handle=0x{:X}, VA=0x{va:X}, RVA={:?}",
+                method.0,
+                va.checked_sub(assembly_base)
+            )
+        })?;
+        if method_name == ".ctor" || method_name == ".cctor" {
+            stats.constructors += 1;
+        } else {
+            stats.methods += 1;
+        }
+    }
+    stats.methods_time += methods_started.elapsed();
+    out.push_str("}\n\n");
+    stats.types += 1;
+    Ok(())
+}
+
+fn type_modifier(attrs: TypeAttributes, is_enum: bool, is_value: bool, out: &mut String) {
+    out.push_str(match attrs & TypeAttributes::VisibilityMask {
         TypeAttributes::Public | TypeAttributes::NestedPublic => "public ",
-        TypeAttributes::NotPublic
-        | TypeAttributes::NestedFamANDAssem
-        | TypeAttributes::NestedAssembly => "internal ",
         TypeAttributes::NestedPrivate => "private ",
         TypeAttributes::NestedFamily => "protected ",
         TypeAttributes::NestedFamORAssem => "protected internal ",
-        _ => "",
+        _ => "internal ",
     });
-
-    if attributes.contains(TypeAttributes::Abstract) && attributes.contains(TypeAttributes::Sealed)
-    {
-        ret.push_str("static ");
-    } else if !attributes.contains(TypeAttributes::Interface)
-        && attributes.contains(TypeAttributes::Abstract)
-    {
-        ret.push_str("abstract ");
-    } else if !ty.get_isenum().unwrap().unbox() && attributes.contains(TypeAttributes::Sealed) {
-        ret.push_str("sealed ");
+    let is_interface = attrs.contains(TypeAttributes::Interface);
+    if attrs.contains(TypeAttributes::Abstract) && attrs.contains(TypeAttributes::Sealed) {
+        out.push_str("static ");
+    } else if attrs.contains(TypeAttributes::Abstract) && !is_interface {
+        out.push_str("abstract ");
+    } else if attrs.contains(TypeAttributes::Sealed) && !is_enum && !is_value {
+        out.push_str("sealed ");
     }
-
-    if ty.get_isinterface().unwrap().unbox() {
-        ret.push_str("interface ");
-    } else if ty.get_isenum().unwrap().unbox() {
-        ret.push_str("enum ");
-    } else if ty.get_isvaluetype().unwrap().unbox() {
-        ret.push_str("struct ");
+    out.push_str(if is_interface {
+        "interface "
+    } else if is_enum {
+        "enum "
+    } else if is_value {
+        "struct "
     } else {
-        ret.push_str("class ");
-    }
-
-    ret
+        "class "
+    });
 }
 
-fn method_modifier(method: &MethodInfo) -> String {
-    let flags = method.get_attributes().unwrap().unbox();
-    let access = flags & MethodAttributes::MemberAccessMask;
-
-    let mut output = String::from(match access {
+fn method_modifier(attrs: MethodAttributes, out: &mut String) {
+    out.push_str(match attrs & MethodAttributes::MemberAccessMask {
         MethodAttributes::Private => "private ",
-        MethodAttributes::Public => "public ",
         MethodAttributes::Family => "protected ",
         MethodAttributes::Assembly | MethodAttributes::FamANDAssem => "internal ",
         MethodAttributes::FamORAssem => "protected internal ",
+        MethodAttributes::Public => "public ",
         _ => "",
     });
-
-    if flags.contains(MethodAttributes::Static) {
-        output.push_str("static ");
+    if attrs.contains(MethodAttributes::Static) {
+        out.push_str("static ");
     }
-
-    if flags.contains(MethodAttributes::Abstract) {
-        output.push_str("abstract ");
-        if (flags & MethodAttributes::VtableLayoutMask) == MethodAttributes::ReuseSlot {
-            output.push_str("override ");
-        }
-    } else if flags.contains(MethodAttributes::Final) {
-        if (flags & MethodAttributes::VtableLayoutMask) == MethodAttributes::ReuseSlot {
-            output.push_str("sealed override ");
-        }
-    } else if flags.contains(MethodAttributes::Virtual) {
-        if (flags & MethodAttributes::VtableLayoutMask) == MethodAttributes::NewSlot {
-            output.push_str("virtual ");
-        } else {
-            output.push_str("override ");
-        }
-    }
-
-    if flags.contains(MethodAttributes::PinvokeImpl) {
-        output.push_str("extern ");
-    }
-
-    output
-}
-
-fn format_method_to_csharp(method: &MethodInfo) -> String {
-    let attributes = format_custom_atrributes(method.get_custom_attributes());
-    let modifier = method_modifier(method);
-    let return_type = method.get_return_type().unwrap().format_type_name(true);
-    let method_name = method.get_name().unwrap().as_str();
-    let generic_arguments = if method.get_is_generic_method().unwrap().unbox() {
-        &format!(
-            "<{}>",
-            method
-                .get_generic_arguments()
-                .iter()
-                .map(|v| v.format_type_name(true))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    } else {
-        ""
-    };
-
-    let parameters = method
-        .get_parameters()
-        .iter()
-        .map(reflection::parameter_info::RuntimeParameterInfo::format_to_csharp)
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let rva = method.get_il2cpp_method().rva();
-    format!(
-        "{attributes}{modifier}{return_type} {method_name}{generic_arguments}({parameters}) {{}} // VA: 0x{:X} RVA: 0x{:X}",
-        0x180000000usize + rva,
-        rva
-    )
-}
-
-fn format_event_to_csharp(event: &EventInfo) -> String {
-    let mut out = String::with_capacity(256);
-
-    let attributes = format_custom_atrributes(event.get_custom_attributes());
-    let add = event.get_add_method(true).ok().filter(|m| !m.is_null());
-    let remove = event.get_remove_method(true).ok().filter(|m| !m.is_null());
-    let raise = event.get_raise_method(true).ok().filter(|m| !m.is_null());
-
-    let name = event
-        .get_name()
-        .map(|v| v.as_str().to_string())
-        .unwrap_or_default();
-
-    let accessor = add.as_ref().or(remove.as_ref()).or(raise.as_ref());
-    let (modifier, type_name) = match accessor {
-        Some(m) => {
-            let modifier = method_modifier(m);
-            let type_name = m.get_parameters().first().map_or_else(
-                || "object".to_string(),
-                |p| p.get_parameter_type().unwrap().format_type_name(true),
-            );
-            (modifier, type_name)
-        }
-        None => (String::new(), "object".to_string()),
-    };
-
-    let accessor_str = |method: &Option<MethodInfo>, keyword: &str| -> String {
-        method
-            .as_ref()
-            .map(|m| format!("/* 0x{:X} */ {keyword}; ", m.get_il2cpp_method().rva()))
-            .unwrap_or_default()
-    };
-    let accessors = format!(
-        "{}{}{}",
-        accessor_str(&add, "add"),
-        accessor_str(&remove, "remove"),
-        accessor_str(&raise, "raise")
-    );
-
-    out.push_str(&attributes);
-    out.push_str(&format!(
-        "{modifier}event {type_name} {name} {{ {accessors}}}"
-    ));
-    out.push_str(&format!(" // Token: 0x{:X}", event.get_metadata_token()));
-
-    out
-}
-
-fn format_property_to_csharp(prop: &PropertyInfo) -> String {
-    let mut out = String::with_capacity(256);
-
-    let attributes = format_custom_atrributes(prop.get_custom_attributes());
-    let property_type = prop.get_property_type().unwrap().format_type_name(true);
-    let property_name = prop.get_name().unwrap().as_str();
-
-    let get = prop.get_get_method(true).unwrap();
-    let set = prop.get_set_method(true).unwrap();
-
-    let modifier = if !get.is_null() {
-        method_modifier(&get)
-    } else if !set.is_null() {
-        method_modifier(&set)
-    } else {
-        String::new()
-    };
-
-    let get_accessor = if !get.is_null() {
-        format!("/* 0x{:X} */ get;", get.get_il2cpp_method().rva())
-    } else {
-        String::new()
-    };
-    let set_accessor = if !set.is_null() {
-        format!("/* 0x{:X} */ set;", set.get_il2cpp_method().rva())
-    } else {
-        String::new()
-    };
-
-    let accessors = if !get_accessor.is_empty() && !set_accessor.is_empty() {
-        format!("{get_accessor} {set_accessor}")
-    } else {
-        get_accessor + &set_accessor
-    };
-
-    out.push_str(&attributes);
-    out.push_str(&modifier);
-    out.push_str(&property_type);
-    out.push(' ');
-    out.push_str(&property_name);
-    out.push_str(" { ");
-    out.push_str(&accessors);
-    out.push_str(" } // Token: 0x");
-    out.push_str(&format!("{:X}", prop.get_metadata_token()));
-
-    out
-}
-
-fn write_generic_methods(
-    ty: &RuntimeType,
-    method: &MethodInfo,
-    metadata_methods: &HashMap<i32, HashMap<i32, Vec<MethodInfo>>>,
-    out: &mut String,
-) {
-    if method.get_il2cpp_method().rva() == 0
-        && let Some(methods) = metadata_methods
-            .get(&ty.get_metadata_token())
-            .and_then(|m| m.get(&method.get_metadata_token()))
+    if attrs.contains(MethodAttributes::Abstract) {
+        out.push_str("abstract ");
+    } else if attrs.contains(MethodAttributes::Final)
+        && attrs.contains(MethodAttributes::Virtual)
+        && !attrs.contains(MethodAttributes::NewSlot)
     {
-        let grouped =
-            methods
-                .iter()
-                .fold(HashMap::<usize, Vec<MethodInfo>>::new(), |mut f, acc| {
-                    f.entry(acc.get_il2cpp_method().rva())
-                        .or_default()
-                        .push(*acc);
-                    f
-                });
+        out.push_str("sealed override ");
+    } else if attrs.contains(MethodAttributes::Virtual) {
+        out.push_str(if attrs.contains(MethodAttributes::NewSlot) {
+            "virtual "
+        } else {
+            "override "
+        });
+    }
+    if attrs.contains(MethodAttributes::PinvokeImpl) {
+        out.push_str("extern ");
+    }
+}
 
-        out.push_str("\t/* GenericInstMethod:\n");
-        for (rva, methods) in grouped {
-            out.push_str(&format!("\t|\n\t|-RVA: 0x{rva:X}\n"));
-            for method in methods {
-                out.push_str(&format!(
-                    "\t|-{}.{}<{}>\n",
-                    RuntimeType::from_class(method.get_il2cpp_method().class())
-                        .unwrap()
-                        .format_type_name(true),
-                    method.get_name().unwrap().as_str(),
-                    method
-                        .get_generic_arguments()
-                        .iter()
-                        .map(|v| v.format_type_name(true))
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                ));
+fn field_modifier(attrs: FieldAttributes, out: &mut String) {
+    out.push_str(match attrs & FieldAttributes::FieldAccessMask {
+        FieldAttributes::Private => "private ",
+        FieldAttributes::Family => "protected ",
+        FieldAttributes::Assembly | FieldAttributes::FamANDAssem => "internal ",
+        FieldAttributes::FamORAssem => "protected internal ",
+        FieldAttributes::Public => "public ",
+        _ => "",
+    });
+    if attrs.contains(FieldAttributes::Literal) {
+        out.push_str("const ");
+    } else {
+        if attrs.contains(FieldAttributes::Static) {
+            out.push_str("static ");
+        }
+        if attrs.contains(FieldAttributes::InitOnly) {
+            out.push_str("readonly ");
+        }
+    }
+}
+
+fn render_method(
+    method: Il2CppMethod,
+    name: &str,
+    type_name: &str,
+    va: usize,
+    names: &mut Types,
+    out: &mut String,
+    assembly_base: usize,
+    assembly_size: usize,
+) -> Result<()> {
+    if va != 0 {
+        let rva = va
+            .checked_sub(assembly_base)
+            .context("method precedes GameAssembly")?;
+        ensure!(
+            rva < assembly_size && names.memory.is_executable(va),
+            "method address outside executable GameAssembly"
+        );
+        writeln!(out, "\t// RVA: 0x{rva:X} VA: 0x{va:X}")?;
+    } else {
+        out.push_str("\t// no native address\n");
+    }
+    let flags_address = method
+        .0
+        .checked_add(names.method_flags_offset)
+        .context("method flags address overflow")?;
+    let flags = unsafe { names.memory.read::<u16>(flags_address) }?;
+    let attrs = MethodAttributes::from_bits_retain(i32::from(flags));
+    ensure!(
+        api::il2cpp_method_is_instance(method) != attrs.contains(MethodAttributes::Static),
+        "method flags disagree with native instance API"
+    );
+    out.push('\t');
+    method_modifier(attrs, out);
+    let is_ctor = name == ".ctor" || name == ".cctor";
+    if is_ctor {
+        // Native metadata names, including generic arity, follow the reference dumper.
+        out.push_str(type_name);
+    } else {
+        let ty = method.get_return_type()?;
+        if api::il2cpp_type_is_byref(ty) {
+            out.push_str("ref ");
+        }
+        write!(out, "{} {name}", names.name(ty)?.trim_end_matches('&'))?;
+    }
+    out.push('(');
+    let count = api::il2cpp_method_get_param_count(method);
+    ensure!(count <= 65536, "invalid parameter count {count}");
+    for index in 0..count {
+        if index != 0 {
+            out.push_str(", ");
+        }
+        let ty = api::il2cpp_method_get_param(method, index);
+        ensure!(ty.0 != 0, "parameter {index} has null type");
+        let attrs = api::il2cpp_type_get_attrs(ty);
+        if api::il2cpp_type_is_byref(ty) {
+            out.push_str(match attrs & 3 {
+                2 => "out ",
+                1 => "in ",
+                _ => "ref ",
+            });
+        } else {
+            if attrs & 1 != 0 {
+                out.push_str("[In] ");
+            }
+            if attrs & 2 != 0 {
+                out.push_str("[Out] ");
             }
         }
-        out.push_str("\t*/\n");
+        write!(out, "{} p{index}", names.name(ty)?.trim_end_matches('&'))?;
     }
-}
-
-fn format_type_to_csharp(
-    ty: &RuntimeType,
-    metadata_methods: &HashMap<i32, HashMap<i32, Vec<MethodInfo>>>,
-) -> String {
-    let mut out = String::with_capacity(1024);
-    let as_il2cpp_type = ty.get_il2cpp_type();
-    let attributes = format_custom_atrributes(ty.get_custom_attributes());
-    let modifier = type_modifier(ty);
-    let type_name = ty.format_type_name(false);
-
-    let interfaces = ty
-        .base_types()
-        .iter()
-        .filter(|ty| {
-            let name = ty.get_name().unwrap().as_str();
-            name != "Object" && name != "Enum" && name != "ValueType"
-        })
-        .map(|v| v.format_type_name(true))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let interfaces = if !interfaces.is_empty() {
-        format!(" : {interfaces}")
-    } else {
-        String::new()
-    };
-
-    out.push_str(&attributes);
-    out.push_str(&modifier);
-    out.push_str(&type_name);
-    out.push_str(interfaces.as_str());
-    out.push_str("\n{\n");
-
-    let fields = as_il2cpp_type.get_class().get_fields();
-    if !fields.is_empty() {
-        out.push_str("\t// Fields\n");
-        for field in fields {
-            let field_str = FieldInfo::from_il2cpp_field(field)
-                .unwrap()
-                .to_string()
-                .replace('\n', "\n\t");
-            out.push('\t');
-            out.push_str(&field_str);
-            out.push('\n');
-        }
-    }
-
-    let properties = ty.get_properties(62);
-    if !properties.is_empty() {
-        out.push_str("\n\t// Properties\n");
-        for property in &properties {
-            let prop_str = format_property_to_csharp(property).replace('\n', "\n\t");
-            out.push('\t');
-            out.push_str(&prop_str);
-            out.push('\n');
-        }
-    }
-
-    let mut events = ty.get_events(62);
-    if !events.is_empty() {
-        events.sort_by_key(reflection::event_info::EventInfo::get_metadata_token);
-        out.push_str("\n\t// Events\n");
-        for event in &events {
-            let event_str = format_event_to_csharp(event).replace('\n', "\n\t");
-            out.push('\t');
-            out.push_str(&event_str);
-            out.push('\n');
-        }
-    }
-
-    let methods = as_il2cpp_type
-        .get_class()
-        .get_methods()
-        .into_iter()
-        .filter_map(|v| MethodInfo::from_handle(v).ok())
-        .collect::<Vec<_>>();
-
-    let (constructors, methods): (Vec<MethodInfo>, Vec<MethodInfo>) =
-        methods.iter().partition(|m| {
-            let name = m.get_name().unwrap().as_str();
-            name.ends_with(".ctor") || name.ends_with(".cctor")
-        });
-
-    if !constructors.is_empty() {
-        out.push_str("\n\t// Constructors\n");
-        for constructor in constructors {
-            out.push('\t');
-            out.push_str(&format_method_to_csharp(&constructor).replace('\n', "\n\t"));
-            out.push('\n');
-            write_generic_methods(ty, &constructor, metadata_methods, &mut out);
-        }
-    }
-
-    if !methods.is_empty() {
-        out.push_str("\n\t// Methods\n");
-        for method in methods {
-            out.push('\t');
-            out.push_str(&format_method_to_csharp(&method).replace('\n', "\n\t"));
-            out.push('\n');
-            write_generic_methods(ty, &method, metadata_methods, &mut out);
-        }
-    }
-
-    out.push_str("}\n");
-
-    out
+    out.push_str(") { }\n");
+    Ok(())
 }

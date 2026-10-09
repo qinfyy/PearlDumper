@@ -75,15 +75,15 @@ fn initialize_binary_layout() -> anyhow::Result<()> {
 #[allow(unused)]
 pub fn dump() -> anyhow::Result<()> {
     initialize_binary_layout()?;
-    log::info!("Generating HSR-OWNER schema: data.json, excel_paths.json, mod.rs");
+    log::info!("Generating schema: data.json, excel_paths.json, mod.rs");
     let mut structs = File::create("DUMP/mod.rs.partial")?;
     let mut data = File::create("DUMP/data.json.partial")?;
     let mut paths = File::create("DUMP/excel_paths.json.partial")?;
-    log::info!("Schema step 1/2: generating mod.rs");
+    log::info!("generating mod.rs");
     excel_mod_rs::gen_excel_structs(&mut structs)?;
-    log::info!("Schema step 2/2: generating data.json and excel_paths.json");
+    log::info!("generating data.json and excel_paths.json");
     data_json::gen_types(&mut data, &mut paths)?;
-    log::info!("Flushing and publishing HSR-OWNER schema files");
+    log::info!("Flushing and publishing schema files");
     for file in [&structs, &data, &paths] {
         file.sync_all()?;
     }

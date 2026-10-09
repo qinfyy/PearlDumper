@@ -36,6 +36,9 @@ impl FieldInfo {
 
     #[method("GetValue", 14)]
     pub fn get_value(&self, obj: Il2CppObject) -> Result<Il2CppObject>;
+
+    #[method("GetRawConstantValue", 18)]
+    pub fn get_raw_constant_value(&self) -> Result<Il2CppObject>;
 }
 
 #[il2cpp_api("System.Reflection.FieldInfo")]

@@ -12,6 +12,16 @@ impl Il2CppField {
     }
 
     #[inline]
+    pub fn get_flags(&self) -> i32 {
+        api::il2cpp_field_get_flags(*self)
+    }
+
+    #[inline]
+    pub fn get_type(&self) -> crate::vm::r#type::Il2CppType {
+        api::il2cpp_field_get_type(*self)
+    }
+
+    #[inline]
     pub fn offset(&self) -> usize {
         api::il2cpp_field_get_offset(*self)
     }

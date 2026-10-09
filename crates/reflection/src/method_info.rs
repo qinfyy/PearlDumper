@@ -66,18 +66,15 @@ impl MethodInfo {
     pub fn get_return_type(&self) -> anyhow::Result<RuntimeType> {
         anyhow::ensure!(!self.is_null(), "null MethodInfo has no return type");
         let method = self.get_il2cpp_method();
-        let name = method.get_name();
-        // Native method enumeration includes MonoCMethod objects. Constructors
-        // do not implement MonoMethod's ReturnType slot; native signatures still
-        // provide System.Void for C# and script output without virtual dispatch.
-        let result = if matches!(name.as_ref(), ".ctor" | ".cctor") {
-            let ty = il2cpp::api::il2cpp_method_get_return_type(method);
-            anyhow::ensure!(!ty.is_null(), "null native return type for {name}");
-            RuntimeType::from_il2cpp_type(ty)?
-        } else {
-            self.get_return_type_internal()?
-        };
-        anyhow::ensure!(!result.is_null(), "null return type for method {name}");
+        // MonoCMethod does not implement MonoMethod's ReturnType getter. Names
+        // may be stripped, so use the real native signature for every method.
+        let result = RuntimeType::from_il2cpp_type(method.get_return_type()?)?;
+        anyhow::ensure!(
+            !result.is_null(),
+            "null reflected return type: method=0x{:X}, reflection=0x{:X}",
+            method.0,
+            self.0
+        );
         Ok(result)
     }
 
@@ -90,6 +87,10 @@ impl MethodInfo {
         }
     }
 
+    pub fn try_get_generic_arguments(&self) -> anyhow::Result<Vec<RuntimeType>> {
+        self.get_generic_arguments_internal()?.try_to_vec()
+    }
+
     #[inline]
     pub fn get_custom_attributes(&self) -> Vec<Il2CppObject> {
         self.get_custom_attributes_internal(true)
@@ -99,11 +100,17 @@ impl MethodInfo {
 
     #[inline]
     pub fn get_parameters(&self) -> Vec<RuntimeParameterInfo> {
-        unsafe {
-            self.get_parameters_internal()
-                .map(il2cpp::api::Il2CppArray::to_vec::<RuntimeParameterInfo>)
-                .unwrap_or_default()
-        }
+        self.try_get_parameters().unwrap_or_default()
+    }
+
+    pub fn try_get_parameters(&self) -> anyhow::Result<Vec<RuntimeParameterInfo>> {
+        let array = self.get_parameters_internal()?;
+        anyhow::ensure!(
+            !array.is_null(),
+            "null reflection parameter array for 0x{:X}",
+            self.0
+        );
+        array.try_to_vec()
     }
 
     #[inline]

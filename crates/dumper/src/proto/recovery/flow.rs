@@ -49,6 +49,7 @@ pub(crate) struct FieldCopy {
     pub proto_offset: u32,
     pub game_offset: u32,
     pub instruction: usize,
+    pub width: usize,
 }
 
 pub(crate) struct ParserLayout {
@@ -170,6 +171,7 @@ pub(crate) fn field_copies(
                 proto_offset: offset,
                 game_offset: i.memory_displacement32(),
                 instruction: i.ip() as usize,
+                width,
             });
         }
     }
