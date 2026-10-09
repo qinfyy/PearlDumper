@@ -19,7 +19,7 @@ use windows::{
 fn run(module: *mut c_void) -> anyhow::Result<()> {
     unsafe {
         let _ = AllocConsole();
-        let _ = SetConsoleTitleW(w!("Dumper"));
+        let _ = SetConsoleTitleW(w!("Pearl Dumper"));
     }
     let config = castorice_config::Config::load();
     // Keep configuration errors visible through the default logger.

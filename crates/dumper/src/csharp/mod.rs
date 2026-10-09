@@ -41,20 +41,15 @@ pub fn dump() -> Result<()> {
     let final_name = "DUMP/dump.cs";
     let file = File::create(partial).with_context(|| format!("creating {partial}"))?;
     let mut out = BufWriter::with_capacity(1024 * 1024, file);
+    writeln!(out, "// CSharp rendered")?;
     let mut assemblies = dump_header(&mut out, classes)?;
-    writeln!(out, "// Native C# export")?;
-    writeln!(
-        out,
-        "// Types, fields and methods; native metadata names are preserved.\n"
-    )?;
-
     let mut stats = Stats::default();
     let mut seen = HashSet::with_capacity(total);
     let mut body = String::with_capacity(16 * 1024);
     let mut last_progress = started;
     let mut last_index = 0;
     log::info!(
-        "Csharp native export: {total} type definitions; types/fields/methods only, no managed reflection"
+        "Csharp renderer: {total} type definitions; types/fields/methods only, no managed reflection"
     );
 
     for (index, &class) in classes.iter().enumerate() {
@@ -143,7 +138,7 @@ pub fn dump() -> Result<()> {
     drop(out);
     fs::rename(partial, final_name).with_context(|| format!("publishing {final_name}"))?;
     log::info!(
-        "Csharp native export complete: types={}, empty type names={}, fields={}, constructors={}, methods={}, cached names={}, memory queries={}, fields {:.2}s, methods {:.2}s, total {:.2}s",
+        "Csharp renderer complete: types={}, empty type names={}, fields={}, constructors={}, methods={}, cached names={}, memory queries={}, fields {:.2}s, methods {:.2}s, total {:.2}s",
         stats.types,
         stats.empty_type_names,
         stats.fields,

@@ -116,7 +116,7 @@ impl Message {
             result.push_str(&format!(
                 "{}\t{} {} = {}; // offset: {}\n",
                 indent,
-                qualified_field_type(&field.kind),
+                format_field_type(&field.kind),
                 field_display_name,
                 field.number,
                 field.offset
@@ -141,7 +141,7 @@ impl Message {
                     result.push_str(&format!(
                         "{}\t\t{} {} = {}; // offset: {}\n",
                         indent,
-                        qualified_field_type(&field.kind),
+                        format_field_type(&field.kind),
                         field_display_name,
                         field.number,
                         field.offset
@@ -150,7 +150,7 @@ impl Message {
                     result.push_str(&format!(
                         "{}\t\t{} {} = {};\n",
                         indent,
-                        qualified_field_type(&field.kind),
+                        format_field_type(&field.kind),
                         field_display_name,
                         field.number
                     ));
@@ -230,35 +230,8 @@ pub fn snake_field(input: &str) -> String {
     }
 }
 
-fn qualified_field_type(kind: &str) -> String {
-    // Keep internal names compatible with the naming handlers. Only serialized
-    // references become absolute, so a nested type cannot shadow a root message.
-    rewrite_type_tokens(kind, |name| {
-        if matches!(
-            name,
-            "repeated"
-                | "map"
-                | "bool"
-                | "int32"
-                | "int64"
-                | "uint32"
-                | "uint64"
-                | "sint32"
-                | "sint64"
-                | "fixed32"
-                | "fixed64"
-                | "sfixed32"
-                | "sfixed64"
-                | "float"
-                | "double"
-                | "string"
-                | "bytes"
-        ) {
-            name.to_owned()
-        } else {
-            format!(".{}", name.trim_start_matches('.'))
-        }
-    })
+fn format_field_type(kind: &str) -> String {
+    rewrite_type_tokens(kind, |name| name.trim_start_matches('.').to_owned())
 }
 
 pub(super) fn rewrite_type_tokens(kind: &str, mut rename: impl FnMut(&str) -> String) -> String {

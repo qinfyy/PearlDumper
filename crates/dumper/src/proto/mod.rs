@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io::{BufWriter, Write},
+    io::Write,
     sync::OnceLock,
     time::{Duration, Instant},
 };
@@ -220,11 +220,9 @@ fn dump_inner<W: Write>(
     let rsp_notify_names = nt::get_rsp_notify_names(&mut request_scan)?;
 
     // Registry coverage and wire fields are independent of optional name hints.
-    // Publish a separately named checkpoint before any naming handler can fail.
-    log::info!("Writing core protocol checkpoint before name recovery");
-    let (core_names, mut type_to_item) = {
-        let mut core_proto = BufWriter::new(File::create("DUMP/StarRail.core.proto.partial")?);
-        let mut core_ids = BufWriter::new(File::create("DUMP/packetIds.core.json.partial")?);
+    log::info!("Building protocol model before name recovery");
+    let (core_names, mut type_to_item, mut recovery) = {
+        let mut core_proto = Vec::new();
         let (cmd_ids, names, items) = output::generate_protobuf(
             &type_cache,
             &minimal_info_map,
@@ -235,36 +233,21 @@ fn dump_inner<W: Write>(
             &HashMap::new(),
             &mut core_proto,
         )
-        .context("generating core protocol checkpoint")?;
+        .context("generating protocol model")?;
         validate_packet_ids(&cmd_ids, &items, &request_scan.registry.all)?;
-        serde_json::to_writer_pretty(&mut core_ids, &cmd_ids)?;
-        writeln!(core_ids)?;
-        core_proto.flush()?;
-        core_ids.flush()?;
-        core_proto.get_ref().sync_all()?;
-        core_ids.get_ref().sync_all()?;
-        drop((core_proto, core_ids));
-        std::fs::rename(
-            "DUMP/StarRail.core.proto.partial",
-            "DUMP/StarRail.core.proto",
-        )?;
-        std::fs::rename(
-            "DUMP/packetIds.core.json.partial",
-            "DUMP/packetIds.core.json",
-        )?;
         log::info!(
-            "Core protocol checkpoint verified: {} messages, {} packet IDs; full name recovery is still pending",
+            "Protocol model verified: {} messages, {} packet IDs; full name recovery is still pending",
             minimal_info_map.len(),
             cmd_ids.len()
         );
-        (names, items)
+        let recovery = recovery::Recovery::new(&items, &names, &core_proto)?;
+        (names, items, recovery)
     };
 
-    let mut recovery = recovery::Recovery::new(&type_to_item, &core_names)?;
     recovery.add(std::mem::take(&mut request_scan.name_hints));
     log::info!("Recovering protocol names and field names from handlers");
-    let (method_handler_map, method_nt_map) = method_nt::get_method_nt_map()
-        .context("protocol name recovery failed; verified core protocol files are retained")?;
+    let (method_handler_map, method_nt_map) =
+        method_nt::get_method_nt_map().context("protocol name recovery failed")?;
     recovery.add(method_nt_map);
     let (initial_names, _) = recovery.resolve();
     // Only the central decision set may rename the final model.

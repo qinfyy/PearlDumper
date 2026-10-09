@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs,
-    path::Path,
 };
 
 use anyhow::Context;
@@ -228,7 +227,11 @@ pub(super) struct Recovery {
 }
 
 impl Recovery {
-    pub fn new(items: &TypeToItemMap, names: &HashMap<String, String>) -> anyhow::Result<Self> {
+    pub fn new(
+        items: &TypeToItemMap,
+        names: &HashMap<String, String>,
+        core_proto: &[u8],
+    ) -> anyhow::Result<Self> {
         let mut result = Self {
             schema: snapshot(items, names),
             hints: Hints::new(),
@@ -246,7 +249,7 @@ impl Recovery {
         };
         result.report.inputs.insert(
             "core_proto_sha256".into(),
-            fingerprint(Path::new("DUMP/StarRail.core.proto"))?,
+            format!("{:x}", Sha256::digest(core_proto)),
         );
         for (owner, shape) in &result.schema {
             if readable(short_name(owner)) {
@@ -688,21 +691,6 @@ pub(super) fn rename_path(path: &str, names: &HashMap<String, String>) -> String
         })
         .collect::<Vec<_>>()
         .join(".")
-}
-
-pub(super) fn fingerprint(path: &Path) -> anyhow::Result<String> {
-    use std::io::Read;
-    let mut file = fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
-    let mut hash = Sha256::new();
-    let mut buffer = [0u8; 65536];
-    loop {
-        let n = file.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        hash.update(&buffer[..n]);
-    }
-    Ok(format!("{:x}", hash.finalize()))
 }
 
 fn save_report(report: &Report) -> anyhow::Result<()> {

@@ -8,7 +8,6 @@ use std::{
 
 use anyhow::Context;
 use castorice_config::{Config, OutputKind};
-use serde::Serialize;
 
 mod csharp;
 mod metadata_runtime;
@@ -76,55 +75,19 @@ fn parse_stages(value: &str) -> anyhow::Result<Vec<Stage>> {
     Ok(stages)
 }
 
-#[derive(Serialize)]
-struct StageReport {
-    name: &'static str,
-    status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
-#[derive(Serialize)]
-struct DumpReport {
-    client_version: String,
-    stages: Vec<StageReport>,
-}
-
-impl DumpReport {
-    fn save(&self) -> anyhow::Result<()> {
-        let mut file = File::create("DUMP/report.json.partial")?;
-        serde_json::to_writer_pretty(&mut file, self)?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename("DUMP/report.json.partial", "DUMP/report.json")?;
-        Ok(())
-    }
-
-    fn execute(
-        &mut self,
-        index: usize,
-        work: impl FnOnce() -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
-        self.stages[index].status = "running";
-        self.save()?;
-        let name = self.stages[index].name;
-        let started = Instant::now();
-        log::info!("Starting {name}");
-        let result = guarded(work).with_context(|| format!("{name} stage failed"));
-        match &result {
-            Ok(()) => {
-                self.stages[index].status = "completed";
-                log::info!("Finished {name} in {:.2}s", started.elapsed().as_secs_f64());
-            }
-            Err(error) => {
-                self.stages[index].status = "failed";
-                self.stages[index].error = Some(format!("{error:#}"));
-                log::error!("{error:#} (after {:.2}s)", started.elapsed().as_secs_f64());
-            }
+fn execute_stage(name: &str, work: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<()> {
+    let started = Instant::now();
+    log::info!("Starting {name}");
+    let result = guarded(work).with_context(|| format!("{name} stage failed"));
+    match &result {
+        Ok(()) => {
+            log::info!("Finished {name} in {:.2}s", started.elapsed().as_secs_f64());
         }
-        self.save()?;
-        result
+        Err(error) => {
+            log::error!("{error:#} (after {:.2}s)", started.elapsed().as_secs_f64());
+        }
     }
+    result
 }
 
 pub fn run(config: &Config) -> anyhow::Result<()> {
@@ -150,22 +113,9 @@ pub fn run(config: &Config) -> anyhow::Result<()> {
             .join(",")
     );
     ensure_output_directory()?;
-    let mut report = DumpReport {
-        client_version: "unknown (dynamic discovery)".to_owned(),
-        stages: std::iter::once("runtime")
-            .chain(stages.iter().map(|stage| stage.name()))
-            .map(|name| StageReport {
-                name,
-                status: "pending",
-                error: None,
-            })
-            .collect(),
-    };
-    report.execute(0, runtime::init_default)?;
-    report.client_version = version::GAME_VERSION.to_string();
-    report.save()?;
-    for (index, stage) in stages.into_iter().enumerate() {
-        report.execute(index + 1, || run_stage(stage))?;
+    execute_stage("runtime", runtime::init_default)?;
+    for stage in stages {
+        execute_stage(stage.name(), || run_stage(stage))?;
     }
     Ok(())
 }

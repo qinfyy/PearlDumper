@@ -13,7 +13,7 @@
 | `proto` 名称恢复 | `nt.txt`、`nt.scoped.txt`、`method_nt.txt`、`nt-report.json` | NT 名称映射及恢复报告 |
 | `schema` | `data.json`、`excel_paths.json`、`mod.rs` | 数据结构、资源路径和 Rust 类型定义 |
 
-另有 `dump.log`（日志）、`report.json`（阶段状态）、`methods.json` 和 `methods2.json`（方法地址映射）。
+另有 `dump.log`（日志）、`methods.json` 和 `methods2.json`（方法地址映射）。
 
 ## Morax 输出
 
